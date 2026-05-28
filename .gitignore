@@ -1,0 +1,10 @@
+# Local datasets and generated results
+data/
+output/
+outputs/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*.egg-info/
+src/tv_phase.egg-info/

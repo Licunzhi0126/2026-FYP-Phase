@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tv-phase"
+version = "0.1.0"
+description = "Projectized TV-PHASE v11 training and experiment pipeline"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "torch",
+    "matplotlib",
+    "networkx",
+    "scikit-learn",
+    "python-igraph",
+    "leidenalg",
+    "seaborn",
+]
+
+[project.optional-dependencies]
+umap = ["umap-learn"]
+
+[project.scripts]
+tv-phase-experiment = "tv_phase.experiment:main"
+tv-phase-simulate = "tv_phase.simulation:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,10 @@
+numpy
+pandas
+torch
+matplotlib
+networkx
+scikit-learn
+python-igraph
+leidenalg
+seaborn
+umap-learn
