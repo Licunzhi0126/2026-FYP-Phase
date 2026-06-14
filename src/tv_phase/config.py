@@ -190,7 +190,37 @@ DATASET_CONFIG = {
             "ppi_prior": "ppi_prior.csv"
         },
         "has_ppi": False,
-        "have_answer": False
+        "have_answer": True
+    },
+    "simulation0611_gene_position": {
+        "name": "simulation0611_gene_position",
+        "description": "simulation_0611 data with expression correlation driven mainly by gene position",
+        "root": DATA_ROOT / "simulation_0611_tv_phase" / "gene_position",
+        "files": {
+            "expression": "expression_data.csv",
+            "view": [],
+            "stage": "cell_stage.csv",
+            "kegg_prior": "kegg_prior.txt",
+            "poswin_prior": "poswin_prior.txt",
+            "ppi_prior": "ppi_prior.csv"
+        },
+        "has_ppi": False,
+        "have_answer": True
+    },
+    "simulation0611_position_kegg": {
+        "name": "simulation0611_position_kegg",
+        "description": "simulation_0611 data with expression correlation driven by gene position and KEGG pathway",
+        "root": DATA_ROOT / "simulation_0611_tv_phase" / "position_kegg",
+        "files": {
+            "expression": "expression_data.csv",
+            "view": [],
+            "stage": "cell_stage.csv",
+            "kegg_prior": "kegg_prior.txt",
+            "poswin_prior": "poswin_prior.txt",
+            "ppi_prior": "ppi_prior.csv"
+        },
+        "has_ppi": False,
+        "have_answer": True
     }
 }
 

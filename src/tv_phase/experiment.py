@@ -28,6 +28,7 @@ EMBEDDING_ORDER = [
     "cell_embedding_input_x",
     "cell_embedding_hgnn_h",
     "cell_embedding_vae_mu",
+    "cell_embedding_phase_aware",
     "cell_embedding_vae_z",
 ]
 
@@ -39,6 +40,8 @@ DATASET_LABELS = {
     "sim_gene100_alpha_1_beta_1": "Sim (alpha=1, beta=1)",
     "sim_gene100_alpha_2_beta_1": "Sim (alpha=2, beta=1)",
     "sim_gene100_alpha_2_beta_2": "Sim (alpha=2, beta=2)",
+    "simulation0611_gene_position": "Sim 0611 (gene position)",
+    "simulation0611_position_kegg": "Sim 0611 (position + KEGG)",
 }
 
 METHOD_LABELS = {
@@ -61,6 +64,7 @@ EMBEDDING_LABELS = {
     "cell_embedding_input_x": "Input-X",
     "cell_embedding_hgnn_h": "HGNN",
     "cell_embedding_vae_mu": "VAE-Mu",
+    "cell_embedding_phase_aware": "Phase-Aware",
     "cell_embedding_vae_z": "VAE-Z",
 }
 

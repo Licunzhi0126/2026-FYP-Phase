@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,7 @@ TV_PHASE_FILES = (
 )
 
 SIMULATION69_FILES = TV_PHASE_FILES + ("simulation69_source_summary.csv",)
+SIMULATION0611_FILES = TV_PHASE_FILES + ("simulation0611_source_summary.csv",)
 
 
 def _prepare_output_dir(output_dir: Path, *, overwrite: bool) -> None:
@@ -52,10 +53,10 @@ def _read_raw_matrix(raw_dir: Path, filename: str) -> pd.DataFrame:
     return pd.read_csv(path, index_col=0)
 
 
-def _read_simulation69_matrix(raw_dir: Path, filename: str) -> pd.DataFrame:
-    path = raw_dir / filename
+def _read_simulation_matrix_file(path: Path, dataset_label: str) -> pd.DataFrame:
+    path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"Missing simulation_6.9 file: {path}")
+        raise FileNotFoundError(f"Missing {dataset_label} file: {path}")
     df = pd.read_csv(path, index_col=0)
     df.index = df.index.astype(str).str.strip()
     df.columns = [str(col).strip() for col in df.columns]
@@ -66,8 +67,18 @@ def _read_simulation69_matrix(raw_dir: Path, filename: str) -> pd.DataFrame:
     return df
 
 
-def _read_simulation69_gene_info(raw_dir: Path) -> pd.DataFrame:
-    candidates = [raw_dir / "gene_info_with_pathway.csv", raw_dir / "gene_info.csv"]
+def _read_simulation69_matrix(raw_dir: Path, filename: str) -> pd.DataFrame:
+    return _read_simulation_matrix_file(raw_dir / filename, "simulation_6.9")
+
+
+def _read_simulation69_gene_info(
+    raw_dir: Path,
+    gene_info_path: Optional[Path] = None,
+) -> Tuple[pd.DataFrame, Path]:
+    if gene_info_path is not None:
+        candidates = [Path(gene_info_path)]
+    else:
+        candidates = [raw_dir / "gene_info_with_pathway.csv", raw_dir / "gene_info.csv"]
     gene_path = next((path for path in candidates if path.exists()), None)
     if gene_path is None:
         raise FileNotFoundError(
@@ -82,7 +93,7 @@ def _read_simulation69_gene_info(raw_dir: Path) -> pd.DataFrame:
     gene_info["gene_id"] = gene_info["gene_id"].astype(str).str.strip()
     if gene_info["gene_id"].duplicated().any():
         raise ValueError(f"{gene_path} contains duplicated gene_id values")
-    return gene_info
+    return gene_info, gene_path
 
 
 def _write_simulation69_cell_stage(
@@ -163,10 +174,16 @@ def _write_simulation69_kegg_prior(gene_info: pd.DataFrame, output_dir: Path, ge
     kegg.to_csv(output_dir / "kegg_prior.txt", sep="\t", header=False, index=False)
 
 
-def _write_simulation69_ppi_prior(raw_dir: Path, output_dir: Path, genes) -> Dict[str, object]:
+def _write_simulation69_ppi_prior(
+    raw_dir: Path,
+    output_dir: Path,
+    genes,
+    *,
+    ppi_path: Optional[Path] = None,
+) -> Dict[str, object]:
     genes = [str(gene).strip() for gene in genes]
     adjacency = pd.DataFrame(0.0, index=genes, columns=genes)
-    ppi_path = raw_dir / "synthetic_expression_ppi.csv"
+    ppi_path = Path(ppi_path) if ppi_path is not None else raw_dir / "synthetic_expression_ppi.csv"
     edge_count = 0
     if ppi_path.exists():
         edges = pd.read_csv(ppi_path)
@@ -305,6 +322,7 @@ def adapt_simulation69_to_tv_phase(
     output_dir,
     *,
     cell_info_path=None,
+    gene_info_path=None,
     missing_stage_label: Optional[str] = None,
     overwrite: bool = False,
 ) -> Dict[str, Path]:
@@ -324,10 +342,14 @@ def adapt_simulation69_to_tv_phase(
     if not expression.columns.equals(e_p.columns) or not expression.columns.equals(e_m.columns):
         raise ValueError("mixed/paternal/maternal expression gene orders do not match")
 
-    gene_info = _read_simulation69_gene_info(raw_dir)
+    gene_info, gene_info_source_path = _read_simulation69_gene_info(
+        raw_dir,
+        Path(gene_info_path) if gene_info_path is not None else None,
+    )
     missing_genes = [gene for gene in expression.columns if gene not in set(gene_info["gene_id"])]
     if missing_genes:
         raise ValueError(f"gene_info is missing expression genes: {missing_genes[:5]}")
+    gene_info = gene_info.set_index("gene_id").loc[expression.columns.tolist()].reset_index()
 
     expression.to_csv(output_dir / "expression_data.csv")
     e_p.to_csv(output_dir / "E_P.csv")
@@ -351,6 +373,7 @@ def adapt_simulation69_to_tv_phase(
                 "n_cells": expression.shape[0],
                 "n_genes": expression.shape[1],
                 "n_pathways": int(gene_info["pathway"].nunique()),
+                "gene_info_source": str(gene_info_source_path.resolve()),
                 **stage_info,
                 **ppi_info,
             }
@@ -363,6 +386,7 @@ def adapt_simulation69_to_tv_phase(
         "output_dir": str(output_dir.resolve()),
         "schema": "simulation_6.9",
         "files": list(SIMULATION69_FILES),
+        "gene_info_source": str(gene_info_source_path.resolve()),
         "stage_info": stage_info,
         "ppi_info": ppi_info,
     }
@@ -374,9 +398,105 @@ def adapt_simulation69_to_tv_phase(
     return {name: output_dir / name for name in SIMULATION69_FILES}
 
 
+def adapt_simulation0611_to_tv_phase(
+    raw_dir,
+    output_dir,
+    *,
+    overwrite: bool = False,
+) -> Dict[str, Path]:
+    raw_dir = Path(raw_dir)
+    output_dir = Path(output_dir)
+    if not raw_dir.exists():
+        raise FileNotFoundError(f"simulation_0611 directory does not exist: {raw_dir}")
+
+    input_dir = raw_dir / "input"
+    ground_truth_dir = raw_dir / "ground_truth"
+    _prepare_output_dir_no_delete(output_dir, overwrite=overwrite)
+
+    expression = _read_simulation_matrix_file(
+        input_dir / "mixed_expression.csv",
+        "simulation_0611 mixed expression",
+    )
+    e_p = _read_simulation_matrix_file(
+        ground_truth_dir / "paternal_expression.csv",
+        "simulation_0611 paternal expression",
+    )
+    e_m = _read_simulation_matrix_file(
+        ground_truth_dir / "maternal_expression.csv",
+        "simulation_0611 maternal expression",
+    )
+
+    if not expression.index.equals(e_p.index) or not expression.index.equals(e_m.index):
+        raise ValueError("mixed/paternal/maternal expression cell orders do not match")
+    if not expression.columns.equals(e_p.columns) or not expression.columns.equals(e_m.columns):
+        raise ValueError("mixed/paternal/maternal expression gene orders do not match")
+
+    gene_info, gene_info_source_path = _read_simulation69_gene_info(
+        raw_dir,
+        input_dir / "gene_info.csv",
+    )
+    missing_genes = [gene for gene in expression.columns if gene not in set(gene_info["gene_id"])]
+    if missing_genes:
+        raise ValueError(f"gene_info is missing expression genes: {missing_genes[:5]}")
+    gene_info = gene_info.set_index("gene_id").loc[expression.columns.tolist()].reset_index()
+
+    expression.to_csv(output_dir / "expression_data.csv")
+    e_p.to_csv(output_dir / "E_P.csv")
+    e_m.to_csv(output_dir / "E_M.csv")
+
+    stage_info = _write_simulation69_cell_stage(
+        output_dir,
+        expression.index.tolist(),
+        cell_info_path=input_dir / "cell_info.csv",
+        missing_stage_label=None,
+    )
+    _write_simulation69_position_prior(gene_info, output_dir, expression.columns.tolist())
+    _write_simulation69_kegg_prior(gene_info, output_dir, expression.columns.tolist())
+    ppi_info = _write_simulation69_ppi_prior(
+        raw_dir,
+        output_dir,
+        expression.columns.tolist(),
+        ppi_path=input_dir / "synthetic_expression_ppi.csv",
+    )
+
+    summary = pd.DataFrame(
+        [
+            {
+                "raw_dir": str(raw_dir.resolve()),
+                "output_dir": str(output_dir.resolve()),
+                "n_cells": expression.shape[0],
+                "n_genes": expression.shape[1],
+                "n_pathways": int(gene_info["pathway"].nunique()),
+                "gene_info_source": str(gene_info_source_path.resolve()),
+                **stage_info,
+                **ppi_info,
+            }
+        ]
+    )
+    summary.to_csv(output_dir / "simulation0611_source_summary.csv", index=False, encoding="utf-8-sig")
+
+    manifest = {
+        "raw_dir": str(raw_dir.resolve()),
+        "output_dir": str(output_dir.resolve()),
+        "schema": "simulation_0611",
+        "files": list(SIMULATION0611_FILES),
+        "gene_info_source": str(gene_info_source_path.resolve()),
+        "stage_info": stage_info,
+        "ppi_info": ppi_info,
+    }
+    (output_dir / "adapter_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    return {name: output_dir / name for name in SIMULATION0611_FILES}
+
+
 __all__ = [
+    "SIMULATION0611_FILES",
     "SIMULATION69_FILES",
     "TV_PHASE_FILES",
     "adapt_raw_simulation_to_tv_phase",
+    "adapt_simulation0611_to_tv_phase",
     "adapt_simulation69_to_tv_phase",
 ]
