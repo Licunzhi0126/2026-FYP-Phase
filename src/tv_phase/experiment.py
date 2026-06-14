@@ -30,6 +30,10 @@ EMBEDDING_ORDER = [
     "cell_embedding_vae_mu",
     "cell_embedding_phase_aware",
     "cell_embedding_vae_z",
+    "truth_maternal_expression_embedding",
+    "truth_paternal_expression_embedding",
+    "truth_total_expression_embedding",
+    "truth_phase_difference_embedding",
 ]
 
 DATASET_LABELS = {
@@ -42,6 +46,8 @@ DATASET_LABELS = {
     "sim_gene100_alpha_2_beta_2": "Sim (alpha=2, beta=2)",
     "simulation0611_gene_position": "Sim 0611 (gene position)",
     "simulation0611_position_kegg": "Sim 0611 (position + KEGG)",
+    "simulation0615_gene_position": "Sim 0615 (gene position)",
+    "simulation0615_position_kegg": "Sim 0615 (position + KEGG)",
 }
 
 METHOD_LABELS = {
@@ -66,6 +72,10 @@ EMBEDDING_LABELS = {
     "cell_embedding_vae_mu": "VAE-Mu",
     "cell_embedding_phase_aware": "Phase-Aware",
     "cell_embedding_vae_z": "VAE-Z",
+    "truth_maternal_expression_embedding": "Truth-M",
+    "truth_paternal_expression_embedding": "Truth-P",
+    "truth_total_expression_embedding": "Truth-Total",
+    "truth_phase_difference_embedding": "Truth-Diff",
 }
 
 
@@ -179,6 +189,9 @@ def _ordered_subset(items: List[str], preferred_order: List[str]) -> List[str]:
 def _plot_dataset_metric_bars(df: pd.DataFrame, dataset_key: str, out_dir: Path) -> None:
     dataset_col = "dataset_plot_key" if "dataset_plot_key" in df.columns else "dataset_type"
     sub = df[df[dataset_col] == dataset_key].copy()
+    if "source" in sub.columns:
+        sub["source"] = sub["source"].fillna("predicted")
+        sub = sub[sub["source"] == "predicted"].copy()
     if sub.empty:
         return
     methods = _ordered_subset(sub["cluster_method"].tolist(), METHOD_ORDER)
@@ -214,6 +227,12 @@ def _plot_dataset_metric_bars(df: pd.DataFrame, dataset_key: str, out_dir: Path)
 
 
 def _plot_overview(df: pd.DataFrame, out_dir: Path) -> None:
+    df = df.copy()
+    if "source" in df.columns:
+        df["source"] = df["source"].fillna("predicted")
+        df = df[df["source"] == "predicted"].copy()
+    if df.empty:
+        return
     dataset_col = "dataset_plot_key" if "dataset_plot_key" in df.columns else "dataset_type"
     datasets = list(dict.fromkeys(df[dataset_col].tolist()))
     methods = _ordered_subset(df["cluster_method"].tolist(), METHOD_ORDER)
@@ -256,14 +275,54 @@ def _save_best_ari_summary(df: pd.DataFrame, out_dir: Path) -> pd.DataFrame:
         group_cols = ["dataset_type", "embedding"]
         if "prior_name" in df.columns:
             group_cols.insert(1, "prior_name")
+        if "source" in df.columns:
+            insert_at = group_cols.index("embedding")
+            group_cols.insert(insert_at, "source")
         idx = df.groupby(group_cols)["ari"].idxmax()
         best_df = (
             df.loc[idx]
-            .sort_values(["dataset_type", "embedding"])
+            .sort_values([col for col in ["dataset_type", "prior_name", "source", "embedding"] if col in df.columns])
             .reset_index(drop=True)
         )
     best_df.to_csv(out_dir / "best_ari_by_dataset_embedding.csv", index=False, encoding="utf-8-sig")
     return best_df
+
+
+def _plot_pred_vs_truth_summary(df: pd.DataFrame, out_dir: Path) -> None:
+    if df.empty or "source" not in df.columns:
+        return
+    sub = df[df["source"].isin(["predicted", "ground_truth"])].copy()
+    if sub.empty:
+        return
+    dataset_col = "dataset_plot_key" if "dataset_plot_key" in sub.columns else "dataset_type"
+    sub["plot_label"] = (
+        sub[dataset_col].astype(str)
+        + "\n"
+        + sub["source"].astype(str)
+        + ":"
+        + sub["embedding"].map(lambda name: EMBEDDING_LABELS.get(name, name))
+    )
+    labels = sub["plot_label"].tolist()
+    x = np.arange(len(sub), dtype=np.float32)
+    fig, axes = plt.subplots(1, len(METRIC_ORDER), figsize=(max(18, len(sub) * 0.7), 7), squeeze=False)
+    for col_idx, metric_name in enumerate(METRIC_ORDER):
+        ax = axes[0, col_idx]
+        colors = ["#4c78a8" if source == "predicted" else "#f58518" for source in sub["source"]]
+        ax.bar(x, sub[metric_name].to_numpy(dtype=np.float32), color=colors)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=55, ha="right", fontsize=8)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_ylabel(metric_name.upper())
+        ax.set_title(metric_name.upper())
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+    handles = [
+        plt.Line2D([], [], marker="s", ls="", color="#4c78a8", label="Predicted"),
+        plt.Line2D([], [], marker="s", ls="", color="#f58518", label="Ground truth"),
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=2)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.savefig(out_dir / "pred_vs_truth_ari_nmi_fmi.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _save_report(df: pd.DataFrame, best_df: pd.DataFrame, out_dir: Path, args) -> None:
@@ -310,7 +369,7 @@ def _save_report(df: pd.DataFrame, best_df: pd.DataFrame, out_dir: Path, args) -
                 continue
             for _, row in dataset_best.iterrows():
                 f.write(
-                    f"  {EMBEDDING_LABELS.get(row['embedding'], row['embedding'])}: "
+                    f"  {row.get('source', 'predicted')} | {EMBEDDING_LABELS.get(row['embedding'], row['embedding'])}: "
                     f"{METHOD_LABELS.get(row['cluster_method'], row['cluster_method'])} "
                     f"(ARI={row['ari']:.4f}, NMI={row['nmi']:.4f}, FMI={row['fmi']:.4f})\n"
                 )
@@ -361,15 +420,20 @@ def run_experiment(args) -> pd.DataFrame:
             columns=[
                 "dataset_type",
                 "cluster_version",
+                "source",
                 "embedding",
                 "cluster_method",
                 "pred_clusters",
                 "fmi",
                 "nmi",
                 "ari",
+                "n_cells",
+                "n_features",
                 "run_dir",
             ]
         )
+    if "source" not in summary_df.columns:
+        summary_df["source"] = "predicted"
     if "prior_name" in summary_df.columns:
         summary_df["dataset_plot_key"] = summary_df.apply(
             lambda row: row["dataset_type"]
@@ -381,6 +445,7 @@ def run_experiment(args) -> pd.DataFrame:
     summary_df.to_csv(out_dir / "experiment_summary.csv", index=False, encoding="utf-8-sig")
     best_df = _save_best_ari_summary(summary_df, out_dir)
     _plot_overview(summary_df, out_dir)
+    _plot_pred_vs_truth_summary(summary_df, out_dir)
     dataset_col = "dataset_plot_key" if "dataset_plot_key" in summary_df.columns else "dataset_type"
     for dataset_key in list(dict.fromkeys(summary_df[dataset_col].tolist())):
         _plot_dataset_metric_bars(summary_df, dataset_key, out_dir)

@@ -38,6 +38,7 @@ from .hypergraph import *
 from .training import *
 from .visualization import *
 from .evaluation import *
+from .output_layout import make_run_output_layout
 
 def _save_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,6 +131,7 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
 
     out_dir = Path(config.output_dir) if config.output_dir else _default_output_dir(version_name, dataset.dataset_type, config.cluster_method)
     out_dir.mkdir(parents=True, exist_ok=True)
+    layout = make_run_output_layout(out_dir)
     dataset_config = DATASET_CONFIG[dataset_type]
     _save_data_contract(out_dir, dataset, dataset_config)
 
@@ -273,6 +275,7 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
         "phase": ["Phase_A" if gi < 0.5 else "Phase_B" for gi in gate_g],
     })
     df_phase.to_csv(out_dir / "hgnn_vae_phase_separation.csv", index=False, encoding="utf-8-sig")
+    df_phase.to_csv(layout.tables / "hgnn_vae_phase_separation.csv", index=False, encoding="utf-8-sig")
     
     # Save gene expression table
     df_gene = pd.DataFrame({
@@ -281,23 +284,30 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
         "confidence": np.abs(gate_g - 0.5) * 2.0,
     })
     df_gene.to_csv(out_dir / "gene_phase_expression.csv", index=False, encoding="utf-8-sig")
+    df_gene.to_csv(layout.tables / "gene_phase_expression.csv", index=False, encoding="utf-8-sig")
 
     # Save intermediate cell embeddings
     _save_embedding_npz(out_dir / "cell_embedding_input_x.npz", x_cells.astype(np.float32), sample_names)
     _save_embedding_npz(out_dir / "cell_embedding_hgnn_h.npz", h_cells.astype(np.float32), sample_names)
     _save_embedding_npz(out_dir / "cell_embedding_vae_mu.npz", mu_cells.astype(np.float32), sample_names)
     _save_embedding_npz(out_dir / "cell_embedding_phase_aware.npz", cell_embed.astype(np.float32), sample_names)
+    _save_embedding_npz(layout.embeddings / "cell_embedding_input_x.npz", x_cells.astype(np.float32), sample_names)
+    _save_embedding_npz(layout.embeddings / "cell_embedding_hgnn_h.npz", h_cells.astype(np.float32), sample_names)
+    _save_embedding_npz(layout.embeddings / "cell_embedding_vae_mu.npz", mu_cells.astype(np.float32), sample_names)
+    _save_embedding_npz(layout.embeddings / "cell_embedding_phase_aware.npz", cell_embed.astype(np.float32), sample_names)
     print(f"  Saved intermediate embeddings: input_x, hgnn_h, vae_mu, phase_aware")
 
     print("\n[Step 6] Saving training loss log...")
     # Save training loss log
     loss_df = pd.DataFrame(result["loss_history"])
     loss_df.to_csv(out_dir / "training_loss_log.csv", index=False, encoding="utf-8-sig")
+    loss_df.to_csv(layout.tables / "training_loss_log.csv", index=False, encoding="utf-8-sig")
     print(f"  Saved training_loss_log.csv with {len(loss_df)} epochs")
     
     # Plot training curves
     print("\n[Step 6.5] Plotting training curves...")
     plot_training_curves(result["loss_history"], str(out_dir / "training_curves.png"))
+    plot_training_curves(result["loss_history"], str(layout.figures_training / "training_curves.png"))
     print(f"  Saved training_curves.png")
 
     print("\n[Step 7] Rendering figures and reports...")
@@ -319,6 +329,7 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
         columns=gene_names
     )
     df_phase_a.to_csv(out_dir / "phase_A_expression.csv", index=True, encoding="utf-8-sig")
+    df_phase_a.to_csv(layout.tables / "phase_A_expression.csv", index=True, encoding="utf-8-sig")
 
     df_phase_b = pd.DataFrame(
         phase_b_expression,
@@ -326,6 +337,7 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
         columns=gene_names
     )
     df_phase_b.to_csv(out_dir / "phase_B_expression.csv", index=True, encoding="utf-8-sig")
+    df_phase_b.to_csv(layout.tables / "phase_B_expression.csv", index=True, encoding="utf-8-sig")
     print(f"  Saved phase-separated expression: phase_A_expression.csv, phase_B_expression.csv")
     
     # Compute phase reconstruction metrics
@@ -354,13 +366,21 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
     # Use configured cluster method, defaulting to kmeans
     cluster_method = config.cluster_method
     cluster_resolution = config.cluster_resolution
+
+    truth_embeddings = (
+        load_simulation_truth_embeddings(dataset_config, sample_names, gene_names)
+        if dataset_config.get("have_answer", False)
+        else {}
+    )
     
     metric_df = _save_embedding_metrics(
         all_cell_embeddings,
+        truth_embeddings=truth_embeddings,
         dataset=dataset,
         cluster_method=cluster_method,
         cluster_resolution=cluster_resolution,
         out_dir=out_dir,
+        layout=layout,
         report_title=f"{version_name} Embedding Clustering Report",
         sample_names=sample_names,
         gate_g=gate_g,
@@ -393,6 +413,7 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
             gene_names=gene_names,
             sample_names=sample_names,
             gate_g=gate_g,
+            layout=layout,
         )
 
     print("\n[Done] Outputs saved to:")
