@@ -150,17 +150,14 @@ def _resolve_dataset_type(base_dir: Path, dataset_type: str) -> str:
         return dataset_type
     raise ValueError(f"Unknown dataset type: {dataset_type}. Valid types: {list(DATASET_CONFIG.keys())}")
 
-def load_dataset(base_dir, dataset_type):
+def load_dataset(base_dir, dataset_type, *, data_root=None):
     base_dir = Path(base_dir)
     dataset_type = _resolve_dataset_type(base_dir, dataset_type)
     
     # 根据 dataset_type 获取对应的配置
     config = DATASET_CONFIG[dataset_type]
     files = config["files"]
-    root = config["root"]
-    
-    # 始终使用 DATASET_CONFIG 中配置的 root 作为 base_dir
-    # 这样可以确保 dataset_type 和 base_dir 的一致性
+    root = resolve_dataset_root(dataset_type, data_root=data_root)
     base_dir = root
     
     view1_dfs = []
@@ -190,7 +187,7 @@ def load_dataset(base_dir, dataset_type):
     stage_name_by_cell = _load_stage_names_simple(stage_file, cells)
     
     # PPI 数据集需要特殊处理 stage
-    if config.get("has_ppi", False):
+    if config.get("normalize_ppi_stage", False):
         stage_name_by_cell = {
             cell: _normalize_ppi_stage_token(stage)
             for cell, stage in stage_name_by_cell.items()

@@ -1,7 +1,7 @@
 # Local datasets and generated results
-data/
-output/
-outputs/
+/data/
+/output/
+/outputs/
 
 # Python generated files
 __pycache__/

@@ -115,6 +115,10 @@ def _match_embedding_to_dim(array: np.ndarray, target_dim: int) -> np.ndarray:
     return np.concatenate([array, pad], axis=1).astype(np.float32, copy=False)
 
 def _position_file_for_dataset(base_dir: Path, dataset_type: str) -> Path:
+    dataset_config = DATASET_CONFIG.get(dataset_type, {})
+    configured_name = str(dataset_config.get("files", {}).get("poswin_prior", "") or "").strip()
+    if configured_name:
+        return Path(base_dir) / configured_name
     if dataset_type == "simulation":
         sim_path = base_dir / "gene_positions_sim.txt"
         if sim_path.exists():
@@ -644,86 +648,24 @@ def _build_data_driven_prior_bundle(
     device: str,
     seed: int,
 ) -> PriorBundle:
-    if prior_name == "none":
-        metadata = {
-            "prior_name": "none",
-            "construction_method": "empty data-driven prior",
-            "external_prior": False,
-            "labels_used": False,
-            "n_edges": 0,
-        }
-        return PriorBundle({}, {}, None, None, data_groups={}, data_group_weights={}, edge_table=pd.DataFrame(), metadata=metadata)
+    from .prior import PriorConfig, build_prior
 
-    if prior_name == "p_glue":
-        table, nodes = _build_correlation_candidate_table(
-            dataset,
+    return build_prior(
+        DATA_ROOT,
+        dataset,
+        PriorConfig(
+            name=prior_name,
             top_k=top_k,
             max_features=max_features,
-            evidence_prefix="glue",
-        )
-        prefix = "p_glue"
-        metadata = {
-            "prior_name": "p_glue",
-            "construction_method": "GLUE-inspired data-driven signed expression/protein feature graph",
-            "top_k": int(top_k),
-            "max_features": None if max_features is None else int(max_features),
-            "external_prior": False,
-            "labels_used": False,
-            "selected_feature_count": len(nodes),
-            "seed": int(seed),
-        }
-    elif prior_name == "p_denoise":
-        table, nodes = _build_correlation_candidate_table(
-            dataset,
-            top_k=denoise_candidate_top_k,
-            max_features=max_features,
-            evidence_prefix="denoise_candidate",
-        )
-        node_features = _feature_node_matrix(dataset, nodes, denoise_node_feature_dim, seed)
-        table = _train_edge_confidence(
-            nodes,
-            table,
-            node_features,
-            hidden_dim=denoise_hidden_dim,
-            epochs=denoise_epochs,
-            lr=denoise_lr,
+            denoise_candidate_top_k=denoise_candidate_top_k,
+            denoise_node_feature_dim=denoise_node_feature_dim,
+            denoise_hidden_dim=denoise_hidden_dim,
+            denoise_epochs=denoise_epochs,
+            denoise_lr=denoise_lr,
+            denoise_top_percent=denoise_top_percent,
             device=device,
             seed=seed,
-        )
-        top_percent = float(denoise_top_percent)
-        if not table.empty and top_percent < 1.0:
-            cutoff = table["confidence"].quantile(max(0.0, min(1.0, 1.0 - top_percent)))
-            table = table[table["confidence"] >= cutoff].copy()
-        prefix = "p_denoise"
-        metadata = {
-            "prior_name": "p_denoise",
-            "construction_method": "data-driven candidate graph denoised by edge confidence model",
-            "candidate_top_k": int(denoise_candidate_top_k),
-            "max_features": None if max_features is None else int(max_features),
-            "node_feature_dim": int(denoise_node_feature_dim),
-            "hidden_dim": int(denoise_hidden_dim),
-            "epochs": int(denoise_epochs),
-            "top_percent": top_percent,
-            "external_prior": False,
-            "labels_used": False,
-            "selected_feature_count": len(nodes),
-            "seed": int(seed),
-        }
-    else:
-        raise ValueError(f"Unknown prior_name={prior_name!r}. Valid values: dataset, none, p_glue, p_denoise")
-
-    groups, weights = _edge_table_to_data_groups(table, prefix)
-    metadata["n_edges"] = int(len(groups))
-    metadata["density"] = float(len(groups) / max(1, len(dataset.common_genes) ** 2))
-    return PriorBundle(
-        kegg_groups={},
-        poswin_groups={},
-        ppi_groups=None,
-        gene_prior_matrix=None,
-        data_groups=groups,
-        data_group_weights=weights,
-        edge_table=table.reset_index(drop=True),
-        metadata=metadata,
+        ),
     )
 
 def _build_base_prior_bundle(base_dir: Path, dataset: DatasetBundle, d_prior: int = 16) -> PriorBundle:
@@ -735,7 +677,7 @@ def _build_base_prior_bundle(base_dir: Path, dataset: DatasetBundle, d_prior: in
         raise ValueError(f"Unknown dataset type: {dataset.dataset_type}")
     
     files = config["files"]
-    dataset_root = base_dir / config["root"]
+    dataset_root = resolve_dataset_root(dataset.dataset_type, data_root=base_dir)
 
     # 加载 KEGG prior - 从 DATASET_CONFIG 获取
     kegg_groups = {}
@@ -786,32 +728,17 @@ def _build_base_prior_bundle(base_dir: Path, dataset: DatasetBundle, d_prior: in
         gene_prior_matrix=None
     )
 
-def build_prior_bundle(base_dir, dataset, d_prior=16, *,
-            allow_position_file_fallback=False, genomic_window_bp=200000, include_window_groups=True,
-            prior_name="dataset", prior_top_k=5, prior_max_features=800,
-            denoise_candidate_top_k=5, denoise_node_feature_dim=64,
-            denoise_hidden_dim=64, denoise_epochs=20, denoise_lr=1e-3,
-            denoise_top_percent=0.7, device="cpu", seed=42):
+def _build_dataset_prior_bundle(
+    base_dir,
+    dataset,
+    d_prior=16,
+    *,
+    allow_position_file_fallback=False,
+    genomic_window_bp=200000,
+    include_window_groups=True,
+):
     base_dir = Path(base_dir)
-    config = DATASET_CONFIG.get(dataset.dataset_type)
-    dataset_root = base_dir / config["root"] if config else base_dir
-
-    prior_name = str(prior_name or "dataset")
-    if prior_name != "dataset":
-        return _build_data_driven_prior_bundle(
-            dataset,
-            prior_name=prior_name,
-            top_k=prior_top_k,
-            max_features=prior_max_features,
-            denoise_candidate_top_k=denoise_candidate_top_k,
-            denoise_node_feature_dim=denoise_node_feature_dim,
-            denoise_hidden_dim=denoise_hidden_dim,
-            denoise_epochs=denoise_epochs,
-            denoise_lr=denoise_lr,
-            denoise_top_percent=denoise_top_percent,
-            device=device,
-            seed=seed,
-        )
+    dataset_root = resolve_dataset_root(dataset.dataset_type, data_root=base_dir)
 
     prior = _build_base_prior_bundle(base_dir, dataset, d_prior)
 
@@ -909,6 +836,7 @@ def build_prior_bundle(base_dir, dataset, d_prior=16, *,
         edge_table=pd.DataFrame(),
         metadata={
             "prior_name": "dataset",
+            "prior_label": "Dataset prior",
             "construction_method": "dataset external KEGG/position/PPI prior",
             "external_prior": True,
             "labels_used": False,
@@ -917,5 +845,35 @@ def build_prior_bundle(base_dir, dataset, d_prior=16, *,
             "n_ppi_groups": 0 if prior.ppi_groups is None else len(prior.ppi_groups),
         },
     )
+
+
+def build_prior_bundle(base_dir, dataset, d_prior=16, *,
+            allow_position_file_fallback=False, genomic_window_bp=200000, include_window_groups=True,
+            prior_name="dataset", prior_top_k=5, prior_max_features=800,
+            denoise_candidate_top_k=5, denoise_node_feature_dim=64,
+            denoise_hidden_dim=64, denoise_epochs=20, denoise_lr=1e-3,
+            denoise_top_percent=0.7, device="cpu", seed=42):
+    """Backward-compatible wrapper around the registered prior builders."""
+    from .prior import PriorConfig, build_prior
+
+    runtime_base_dir = DATA_ROOT if Path(base_dir) == Path(".") else Path(base_dir)
+    config = PriorConfig(
+        name=str(prior_name or "dataset"),
+        d_prior=d_prior,
+        genomic_window_bp=genomic_window_bp,
+        include_window_groups=include_window_groups,
+        top_k=prior_top_k,
+        max_features=prior_max_features,
+        denoise_candidate_top_k=denoise_candidate_top_k,
+        denoise_node_feature_dim=denoise_node_feature_dim,
+        denoise_hidden_dim=denoise_hidden_dim,
+        denoise_epochs=denoise_epochs,
+        denoise_lr=denoise_lr,
+        denoise_top_percent=denoise_top_percent,
+        allow_position_file_fallback=allow_position_file_fallback,
+        device=device,
+        seed=seed,
+    )
+    return build_prior(runtime_base_dir, dataset, config)
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,7 +38,17 @@ from .hypergraph import *
 from .training import *
 from .visualization import *
 from .evaluation import *
-from .output_layout import make_run_output_layout
+from .prior import PriorConfig, build_prior
+from .output import (
+    copy_adapter_manifest,
+    export_data_contract,
+    export_prior,
+    export_run_config,
+    export_training_outputs,
+    make_run_output_layout,
+    render_real_outputs,
+    render_simulation_outputs,
+)
 
 def _save_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,8 +102,14 @@ def _save_prior_artifacts(out_dir: Path, prior: PriorBundle) -> None:
 def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str = "HGNN-VAE-Phase") -> Dict[str, Any]:
     data_name = config.data_name
 
+    project_root, data_root, output_root = resolve_project_paths(
+        config.project_root,
+        config.data_root,
+        config.output_root,
+    )
+
     view1_dfs, expression_df, stage_name_by_cell, view1_name = load_dataset(
-        Path("."), data_name
+        project_root, data_name, data_root=data_root
     )
 
     dataset_type = _resolve_dataset_type(Path("."), data_name)
@@ -129,11 +145,12 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
         },
     )
 
-    out_dir = Path(config.output_dir) if config.output_dir else _default_output_dir(version_name, dataset.dataset_type, config.cluster_method)
+    out_dir = Path(config.output_dir) if config.output_dir else output_root / version_name / dataset.dataset_type / config.cluster_method
     out_dir.mkdir(parents=True, exist_ok=True)
     layout = make_run_output_layout(out_dir)
     dataset_config = DATASET_CONFIG[dataset_type]
-    _save_data_contract(out_dir, dataset, dataset_config)
+    dataset_root = resolve_dataset_root(dataset_type, data_root=data_root)
+    export_data_contract(layout, dataset, dataset_config, dataset_root)
 
     print("=" * 60)
     print(f"{version_name} | End-to-End Unsupervised Phase Decomposition")
@@ -156,25 +173,24 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
     print(f"  Labels     : {len(set(dataset.label_names))} classes -> {sorted(set(dataset.label_names))}")
 
     print("\n[Step 2] Building dataset-specific priors...")
-    prior = build_prior_bundle(
-        Path("."),
-        dataset,
+    prior_config = PriorConfig(
+        name=config.prior_name,
         d_prior=config.prior_dim,
-        allow_position_file_fallback=False,
         genomic_window_bp=200000,
         include_window_groups=True,
-        prior_name=config.prior_name,
-        prior_top_k=config.prior_top_k,
-        prior_max_features=config.prior_max_features,
+        top_k=config.prior_top_k,
+        max_features=config.prior_max_features,
         denoise_candidate_top_k=config.denoise_candidate_top_k,
         denoise_node_feature_dim=config.denoise_node_feature_dim,
         denoise_hidden_dim=config.denoise_hidden_dim,
         denoise_epochs=config.denoise_epochs,
         denoise_lr=config.denoise_lr,
         denoise_top_percent=config.denoise_top_percent,
+        allow_position_file_fallback=False,
         device=config.device,
         seed=config.seed,
     )
+    prior = build_prior(data_root, dataset, prior_config)
 
     print(f"  KEGG groups: {len(prior.kegg_groups)}")
     print(f"  Position window groups: {len(prior.poswin_groups)}")
@@ -182,8 +198,8 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
         print(f"  PPI groups: {len(prior.ppi_groups)}")
     if prior.data_groups:
         print(f"  Data-driven prior groups: {len(prior.data_groups)}")
-    _save_position_prior_audit(out_dir, dataset.dataset_type)
-    _save_prior_artifacts(out_dir, prior)
+    _save_position_prior_audit(layout.config, dataset.dataset_type)
+    export_prior(layout, prior, asdict(prior_config))
 
     print("\n[Step 3] Building prior-only hypergraph...")
     hg_data = build_prior_only_hypergraph_dict(
@@ -268,47 +284,17 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
 
     print("\n[Step 5] Exporting tables and embeddings...")
     
-    # Save phase separation table
     df_phase = pd.DataFrame({
         "gene": gene_names,
         "gate_g": gate_g,
         "phase": ["Phase_A" if gi < 0.5 else "Phase_B" for gi in gate_g],
     })
-    df_phase.to_csv(out_dir / "hgnn_vae_phase_separation.csv", index=False, encoding="utf-8-sig")
-    df_phase.to_csv(layout.tables / "hgnn_vae_phase_separation.csv", index=False, encoding="utf-8-sig")
-    
-    # Save gene expression table
     df_gene = pd.DataFrame({
         "gene": gene_names,
         "gate_g": gate_g,
         "confidence": np.abs(gate_g - 0.5) * 2.0,
+        "phase": df_phase["phase"],
     })
-    df_gene.to_csv(out_dir / "gene_phase_expression.csv", index=False, encoding="utf-8-sig")
-    df_gene.to_csv(layout.tables / "gene_phase_expression.csv", index=False, encoding="utf-8-sig")
-
-    # Save intermediate cell embeddings
-    _save_embedding_npz(out_dir / "cell_embedding_input_x.npz", x_cells.astype(np.float32), sample_names)
-    _save_embedding_npz(out_dir / "cell_embedding_hgnn_h.npz", h_cells.astype(np.float32), sample_names)
-    _save_embedding_npz(out_dir / "cell_embedding_vae_mu.npz", mu_cells.astype(np.float32), sample_names)
-    _save_embedding_npz(out_dir / "cell_embedding_phase_aware.npz", cell_embed.astype(np.float32), sample_names)
-    _save_embedding_npz(layout.embeddings / "cell_embedding_input_x.npz", x_cells.astype(np.float32), sample_names)
-    _save_embedding_npz(layout.embeddings / "cell_embedding_hgnn_h.npz", h_cells.astype(np.float32), sample_names)
-    _save_embedding_npz(layout.embeddings / "cell_embedding_vae_mu.npz", mu_cells.astype(np.float32), sample_names)
-    _save_embedding_npz(layout.embeddings / "cell_embedding_phase_aware.npz", cell_embed.astype(np.float32), sample_names)
-    print(f"  Saved intermediate embeddings: input_x, hgnn_h, vae_mu, phase_aware")
-
-    print("\n[Step 6] Saving training loss log...")
-    # Save training loss log
-    loss_df = pd.DataFrame(result["loss_history"])
-    loss_df.to_csv(out_dir / "training_loss_log.csv", index=False, encoding="utf-8-sig")
-    loss_df.to_csv(layout.tables / "training_loss_log.csv", index=False, encoding="utf-8-sig")
-    print(f"  Saved training_loss_log.csv with {len(loss_df)} epochs")
-    
-    # Plot training curves
-    print("\n[Step 6.5] Plotting training curves...")
-    plot_training_curves(result["loss_history"], str(out_dir / "training_curves.png"))
-    plot_training_curves(result["loss_history"], str(layout.figures_training / "training_curves.png"))
-    print(f"  Saved training_curves.png")
 
     print("\n[Step 7] Rendering figures and reports...")
     
@@ -322,23 +308,33 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
     phase_a_expression = expr_matrix * (1 - gate_matrix)  # gate < 0.5 -> Phase A
     phase_b_expression = expr_matrix * gate_matrix        # gate >= 0.5 -> Phase B
 
-    # Save phase-separated expression matrices as CSV (simulation E_P/E_M separation)
     df_phase_a = pd.DataFrame(
         phase_a_expression,
         index=sample_names,
         columns=gene_names
     )
-    df_phase_a.to_csv(out_dir / "phase_A_expression.csv", index=True, encoding="utf-8-sig")
-    df_phase_a.to_csv(layout.tables / "phase_A_expression.csv", index=True, encoding="utf-8-sig")
-
     df_phase_b = pd.DataFrame(
         phase_b_expression,
         index=sample_names,
         columns=gene_names
     )
-    df_phase_b.to_csv(out_dir / "phase_B_expression.csv", index=True, encoding="utf-8-sig")
-    df_phase_b.to_csv(layout.tables / "phase_B_expression.csv", index=True, encoding="utf-8-sig")
-    print(f"  Saved phase-separated expression: phase_A_expression.csv, phase_B_expression.csv")
+    embedding_tables = {
+        "cell_embedding_input_x": x_cells,
+        "cell_embedding_hgnn_h": h_cells,
+        "cell_embedding_vae_mu": mu_cells,
+        "cell_embedding_phase_aware": cell_embed,
+    }
+    loss_df = export_training_outputs(
+        layout,
+        phase_a=df_phase_a,
+        phase_b=df_phase_b,
+        gene_gate=df_gene,
+        embeddings=embedding_tables,
+        sample_names=sample_names,
+        loss_history=result["loss_history"],
+    )
+    plot_training_curves(result["loss_history"], str(layout.logs / "training_curve.png"))
+    print(f"  Saved phase tables, embeddings, and {len(loss_df)} training-loss rows")
     
     # Compute phase reconstruction metrics
     phase_recon_mse = float(((phase_a_expression + phase_b_expression) - expr_matrix).mean() ** 2)
@@ -368,52 +364,75 @@ def run_hgnn_vae_phase_end2end(config: PhaseTrainingConfig, *, version_name: str
     cluster_resolution = config.cluster_resolution
 
     truth_embeddings = (
-        load_simulation_truth_embeddings(dataset_config, sample_names, gene_names)
+        load_simulation_truth_embeddings({**dataset_config, "root": dataset_root}, sample_names, gene_names)
         if dataset_config.get("have_answer", False)
         else {}
     )
     
-    metric_df = _save_embedding_metrics(
+    metric_df = evaluate_embedding_collection(
         all_cell_embeddings,
         truth_embeddings=truth_embeddings,
         dataset=dataset,
         cluster_method=cluster_method,
         cluster_resolution=cluster_resolution,
-        out_dir=out_dir,
-        layout=layout,
-        report_title=f"{version_name} Embedding Clustering Report",
         sample_names=sample_names,
-        gate_g=gate_g,
-        edge_type_weights=result["edge_type_weights"],
-        phase_recon_mse=phase_recon_mse,
-        phase_cosine_sim=cosine_sim,
-        phase_l2_dist=l2_dist,
     )
-    
-    # Save run metadata with edge type weights
-    _save_run_metadata_phase(
-        out_dir,
-        version_name=version_name,
-        dataset=dataset,
-        config=config,
-        edge_type_weights=result["edge_type_weights"],
+    metric_df.to_csv(layout.tables / "embedding_metrics.csv", index=False, encoding="utf-8-sig")
+    export_run_config(
+        layout,
+        config,
+        {
+            "version": version_name,
+            "dataset_type": dataset.dataset_type,
+            "dataset_root": dataset_root,
+            "learned_edge_type_weights": result["edge_type_weights"],
+            "phase_reconstruction_mse": phase_recon_mse,
+            "phase_cosine_similarity": cosine_sim,
+            "phase_l2_distance": l2_dist,
+        },
     )
+    copy_adapter_manifest(layout, dataset_root, dataset_config.get("files", {}).get("adapter_manifest", "adapter_manifest.json"))
+
+    plot_embeddings = {**all_cell_embeddings, **truth_embeddings}
+    if dataset_config.get("have_answer", False) and truth_embeddings:
+        render_simulation_outputs(
+            layout,
+            metric_df=metric_df,
+            embeddings=plot_embeddings,
+            cell_names=sample_names,
+            labels=label_names,
+            gene_names=gene_names,
+            gate_g=gate_g,
+            phase_a=df_phase_a,
+            phase_b=df_phase_b,
+            dataset_root=dataset_root,
+            files=dataset_config.get("files", {}),
+            seed=config.seed,
+        )
+    else:
+        render_real_outputs(
+            layout,
+            metric_df=metric_df,
+            embeddings=all_cell_embeddings,
+            cell_names=sample_names,
+            labels=label_names,
+            seed=config.seed,
+        )
 
     # ============================================
     # Step 8: Evaluation Visualization (only for datasets with ground truth)
     # ============================================
-    if dataset_config.get("have_answer", False):
+    if config.legacy_output and dataset_config.get("have_answer", False):
         print("\n[Step 8] Running evaluation visualization...")
-        _run_evaluation_visualization(
+        _run_evaluation_visualization_legacy(
             out_dir=out_dir,
             dataset=dataset,
-            dataset_config=dataset_config,
+            dataset_config={**dataset_config, "root": dataset_root},
             phase_a_expression=phase_a_expression,
             phase_b_expression=phase_b_expression,
             gene_names=gene_names,
             sample_names=sample_names,
             gate_g=gate_g,
-            layout=layout,
         )
 
     print("\n[Done] Outputs saved to:")

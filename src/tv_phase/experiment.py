@@ -14,12 +14,15 @@ import matplotlib.pyplot as plt
 
 
 from . import pipeline as TV_PHASE
+from .config import resolve_project_paths
+from .output import build_prior_ablation_summary
+from .prior import list_prior_builders, prior_builder_labels
 
 
 # Get dataset types from DATASET_CONFIG
 DATASET_ORDER = list(TV_PHASE.DATASET_CONFIG.keys())
 METHOD_ORDER = ["kmeans", "leiden", "louvain"]
-PRIOR_ORDER = ["dataset", "p_glue", "p_denoise", "none"]
+PRIOR_ORDER = list_prior_builders()
 METRIC_ORDER = ["ari", "nmi", "fmi"]
 EMBEDDING_ORDER = [
     "original_expression_embedding",
@@ -48,6 +51,10 @@ DATASET_LABELS = {
     "simulation0611_position_kegg": "Sim 0611 (position + KEGG)",
     "simulation0615_gene_position": "Sim 0615 (gene position)",
     "simulation0615_position_kegg": "Sim 0615 (position + KEGG)",
+    "simulation0616_expr_position": "Sim 0616 expression (position)",
+    "simulation0616_expr_position_kegg": "Sim 0616 expression (position + KEGG)",
+    "simulation0616_ratio_position": "Sim 0616 ratio (position)",
+    "simulation0616_ratio_position_kegg": "Sim 0616 ratio (position + KEGG)",
 }
 
 METHOD_LABELS = {
@@ -57,10 +64,7 @@ METHOD_LABELS = {
 }
 
 PRIOR_LABELS = {
-    "dataset": "Dataset prior",
-    "p_glue": "P-GLUE",
-    "p_denoise": "P-Denoise",
-    "none": "No prior",
+    **prior_builder_labels(),
 }
 
 EMBEDDING_LABELS = {
@@ -96,14 +100,14 @@ def _reset_run_seed(seed: int) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run TV-PHASE v11 End-to-End Training and Comparison")
     parser.add_argument(
-        "--dataset_types",
+        "--dataset_types", "--dataset-types",
         nargs="+",
         choices=DATASET_ORDER,
         default=DATASET_ORDER,
         help="Datasets to include in the comparison run",
     )
     parser.add_argument(
-        "--cluster_methods",
+        "--cluster_methods", "--cluster-methods",
         nargs="+",
         choices=METHOD_ORDER,
         default=METHOD_ORDER,
@@ -117,10 +121,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prior builders to compare. Use p_glue/p_denoise for SCoPE2 data-driven priors.",
     )
     parser.add_argument(
-        "--output-dir",
+        "--output-dir", "--output-root",
+        dest="output_dir",
         type=Path,
-        default=TV_PHASE.OUTPUT_ROOT / "experiment_v11",
+        default=None,
     )
+    parser.add_argument("--project-root", type=Path, default=None, help="Project root; can also use TV_PHASE_PROJECT_ROOT")
+    parser.add_argument("--data-root", type=Path, default=None, help="Dataset root; can also use TV_PHASE_DATA_ROOT")
+    parser.add_argument("--legacy-output", action="store_true", help="Also create the legacy deep output tree")
     parser.add_argument("--device", default="cpu", help="Torch device (cpu or cuda)")
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument("--feature-dim", type=int, default=64, help="Feature dimension")
@@ -151,6 +159,10 @@ def _run_single_experiment(args, dataset_type: str, prior_name: str, cluster_met
         output_dir=out_dir,
         device=args.device,
         seed=seed,
+        project_root=args.project_root,
+        data_root=args.data_root,
+        output_root=args.output_dir,
+        legacy_output=args.legacy_output,
         prior_name=prior_name,
         prior_top_k=args.prior_top_k,
         prior_max_features=args.prior_max_features,
@@ -230,42 +242,55 @@ def _plot_overview(df: pd.DataFrame, out_dir: Path) -> None:
     df = df.copy()
     if "source" in df.columns:
         df["source"] = df["source"].fillna("predicted")
-        df = df[df["source"] == "predicted"].copy()
+    else:
+        df["source"] = "predicted"
     if df.empty:
         return
     dataset_col = "dataset_plot_key" if "dataset_plot_key" in df.columns else "dataset_type"
     datasets = list(dict.fromkeys(df[dataset_col].tolist()))
     methods = _ordered_subset(df["cluster_method"].tolist(), METHOD_ORDER)
-    embeddings = _ordered_subset(df["embedding"].tolist(), EMBEDDING_ORDER)
-    if not datasets or not methods or not embeddings:
+    if not datasets or not methods:
         return
 
-    fig, axes = plt.subplots(len(datasets), len(METRIC_ORDER), figsize=(24, 10), squeeze=False)
-    width = 0.8 / max(1, len(methods))
-    x = np.arange(len(embeddings), dtype=np.float32)
+    for dataset_key in datasets:
+        sub = df[df[dataset_col] == dataset_key].copy()
+        if sub.empty:
+            continue
+        fig, axes = plt.subplots(2, len(METRIC_ORDER), figsize=(24, 12), squeeze=False)
+        for row_idx, source in enumerate(["predicted", "ground_truth"]):
+            source_df = sub[sub["source"] == source].copy()
+            embeddings = _ordered_subset(source_df["embedding"].tolist(), EMBEDDING_ORDER)
+            if not embeddings:
+                for col_idx, metric_name in enumerate(METRIC_ORDER):
+                    axes[row_idx, col_idx].axis("off")
+                    axes[row_idx, col_idx].set_title(f"{source} {metric_name.upper()} (no rows)")
+                continue
 
-    for row_idx, dataset_type in enumerate(datasets):
-        sub = df[df[dataset_col] == dataset_type].copy()
-        for col_idx, metric_name in enumerate(METRIC_ORDER):
-            ax = axes[row_idx, col_idx]
-            for method_idx, method in enumerate(methods):
-                method_df = sub[sub["cluster_method"] == method].set_index("embedding").reindex(embeddings)
-                y = method_df[metric_name].fillna(0.0).to_numpy(dtype=np.float32)
-                offset = (method_idx - (len(methods) - 1) / 2.0) * width
-                ax.bar(x + offset, y, width=width, label=METHOD_LABELS.get(method, method))
-            ax.set_xticks(x)
-            ax.set_xticklabels([EMBEDDING_LABELS.get(name, name) for name in embeddings], rotation=20, ha="right")
-            ax.set_ylim(-0.05, 1.05)
-            ax.set_ylabel(metric_name.upper())
-            ax.set_title(f"{dataset_type} {metric_name.upper()}")
-            ax.grid(axis="y", linestyle="--", alpha=0.3)
+            width = 0.8 / max(1, len(methods))
+            x = np.arange(len(embeddings), dtype=np.float32)
+            source_label = "Prediction" if source == "predicted" else "Ground Truth"
+            for col_idx, metric_name in enumerate(METRIC_ORDER):
+                ax = axes[row_idx, col_idx]
+                for method_idx, method in enumerate(methods):
+                    method_df = source_df[source_df["cluster_method"] == method].set_index("embedding").reindex(embeddings)
+                    y = method_df[metric_name].fillna(0.0).to_numpy(dtype=np.float32)
+                    offset = (method_idx - (len(methods) - 1) / 2.0) * width
+                    ax.bar(x + offset, y, width=width, label=METHOD_LABELS.get(method, method))
+                ax.set_xticks(x)
+                ax.set_xticklabels([EMBEDDING_LABELS.get(name, name) for name in embeddings], rotation=25, ha="right")
+                ax.set_ylim(-0.05, 1.05)
+                ax.set_ylabel(metric_name.upper())
+                ax.set_title(f"{source_label} {metric_name.upper()}")
+                ax.grid(axis="y", linestyle="--", alpha=0.3)
 
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    if handles:
-        fig.legend(handles, labels, loc="upper center", ncol=max(1, len(methods)))
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
-    fig.savefig(out_dir / "cluster_method_comparison_overview.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, loc="upper center", ncol=max(1, len(methods)))
+        fig.suptitle(f"{dataset_key} Prediction vs Ground Truth Metrics", fontsize=16, fontweight="bold", y=0.98)
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        safe_key = str(dataset_key).replace("[", "_").replace("]", "").replace(" ", "_").replace(":", "_")
+        fig.savefig(out_dir / f"{safe_key}_cluster_method_comparison_overview.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def _save_best_ari_summary(df: pd.DataFrame, out_dir: Path) -> pd.DataFrame:
@@ -377,16 +402,18 @@ def _save_report(df: pd.DataFrame, best_df: pd.DataFrame, out_dir: Path, args) -
 
 
 def run_experiment(args) -> pd.DataFrame:
-    out_dir = Path(args.output_dir)
+    _, _, default_output_root = resolve_project_paths(args.project_root, args.data_root, None)
+    out_dir = Path(args.output_dir) if args.output_dir is not None else default_output_root / "prior_ablation_v1"
     runs_root = out_dir / "runs"
+    summary_dir = out_dir / "summary"
     out_dir.mkdir(parents=True, exist_ok=True)
     runs_root.mkdir(parents=True, exist_ok=True)
+    summary_dir.mkdir(parents=True, exist_ok=True)
 
     frames: List[pd.DataFrame] = []
     dataset_types = _ordered_subset(list(args.dataset_types), DATASET_ORDER)
     cluster_methods = _ordered_subset(list(args.cluster_methods), METHOD_ORDER)
     prior_builders = _ordered_subset(list(args.prior_builders), PRIOR_ORDER)
-    multi_prior_layout = len(prior_builders) > 1 or any(prior != "dataset" for prior in prior_builders)
 
     print("=" * 70)
     print("TV-PHASE v11 End-to-End Experiment")
@@ -399,7 +426,7 @@ def run_experiment(args) -> pd.DataFrame:
     for dataset_type in dataset_types:
         for prior_name in prior_builders:
             for cluster_method in cluster_methods:
-                run_dir = runs_root / dataset_type / prior_name / cluster_method if multi_prior_layout else runs_root / dataset_type / cluster_method
+                run_dir = runs_root / dataset_type / prior_name / cluster_method
                 print("\n" + "-" * 70)
                 print(
                     f"Running {DATASET_LABELS.get(dataset_type, dataset_type)} | "
@@ -420,6 +447,7 @@ def run_experiment(args) -> pd.DataFrame:
             columns=[
                 "dataset_type",
                 "cluster_version",
+                "prior_name",
                 "source",
                 "embedding",
                 "cluster_method",
@@ -442,14 +470,15 @@ def run_experiment(args) -> pd.DataFrame:
             axis=1,
         )
 
-    summary_df.to_csv(out_dir / "experiment_summary.csv", index=False, encoding="utf-8-sig")
-    best_df = _save_best_ari_summary(summary_df, out_dir)
-    _plot_overview(summary_df, out_dir)
-    _plot_pred_vs_truth_summary(summary_df, out_dir)
+    summary_df.to_csv(summary_dir / "experiment_summary.csv", index=False, encoding="utf-8-sig")
+    build_prior_ablation_summary(summary_df, out_dir)
+    best_df = _save_best_ari_summary(summary_df, summary_dir)
+    _plot_overview(summary_df, summary_dir)
+    _plot_pred_vs_truth_summary(summary_df, summary_dir)
     dataset_col = "dataset_plot_key" if "dataset_plot_key" in summary_df.columns else "dataset_type"
     for dataset_key in list(dict.fromkeys(summary_df[dataset_col].tolist())):
-        _plot_dataset_metric_bars(summary_df, dataset_key, out_dir)
-    _save_report(summary_df, best_df, out_dir, args)
+        _plot_dataset_metric_bars(summary_df, dataset_key, summary_dir)
+    _save_report(summary_df, best_df, summary_dir, args)
 
     print("\n[Done] Experiment outputs saved to:")
     print(f"  {out_dir.resolve()}")

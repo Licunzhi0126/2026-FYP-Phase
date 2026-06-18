@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,9 +32,10 @@ try:
 except Exception:
     umap = None
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_ROOT = PROJECT_ROOT / "data"
-OUTPUT_ROOT = PROJECT_ROOT / "output"
+_PACKAGE_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(os.environ.get("TV_PHASE_PROJECT_ROOT", _PACKAGE_PROJECT_ROOT)).expanduser().resolve()
+DATA_ROOT = Path(os.environ.get("TV_PHASE_DATA_ROOT", PROJECT_ROOT / "data")).expanduser().resolve()
+OUTPUT_ROOT = Path(os.environ.get("TV_PHASE_OUTPUT_ROOT", PROJECT_ROOT / "output")).expanduser().resolve()
 
 np.random.seed(42)
 torch.manual_seed(42)
@@ -54,6 +56,7 @@ DATASET_CONFIG = {
             "ppi_prior": "human_ppi.csv"
         },
         "has_ppi": True,
+        "normalize_ppi_stage": True,
         "have_answer": False
     },
     "SCoPE2": {
@@ -251,8 +254,118 @@ DATASET_CONFIG = {
         },
         "has_ppi": False,
         "have_answer": True
+    },
+    "simulation0616_expr_position": {
+        "name": "simulation0616_expr_position",
+        "description": "simulation_0616 expression-correlation mechanism driven by gene position",
+        "root": DATA_ROOT / "simulation_0616_tv_phase" / "expr_position",
+        "files": {
+            "expression": "expression_data.csv",
+            "view": [],
+            "stage": "cell_stage.csv",
+            "kegg_prior": "kegg_prior.txt",
+            "poswin_prior": "poswin_prior.txt",
+            "ppi_prior": "ppi_prior.csv",
+            "truth_paternal": "E_P.csv",
+            "truth_maternal": "E_M.csv",
+            "truth_ratio": "ratio.csv",
+            "adapter_manifest": "adapter_manifest.json",
+        },
+        "has_ppi": True,
+        "normalize_ppi_stage": False,
+        "have_answer": True,
+        "is_simulation": True,
+    },
+    "simulation0616_expr_position_kegg": {
+        "name": "simulation0616_expr_position_kegg",
+        "description": "simulation_0616 expression-correlation mechanism driven by position and KEGG",
+        "root": DATA_ROOT / "simulation_0616_tv_phase" / "expr_position_kegg",
+        "files": {
+            "expression": "expression_data.csv",
+            "view": [],
+            "stage": "cell_stage.csv",
+            "kegg_prior": "kegg_prior.txt",
+            "poswin_prior": "poswin_prior.txt",
+            "ppi_prior": "ppi_prior.csv",
+            "truth_paternal": "E_P.csv",
+            "truth_maternal": "E_M.csv",
+            "truth_ratio": "ratio.csv",
+            "adapter_manifest": "adapter_manifest.json",
+        },
+        "has_ppi": True,
+        "normalize_ppi_stage": False,
+        "have_answer": True,
+        "is_simulation": True,
+    },
+    "simulation0616_ratio_position": {
+        "name": "simulation0616_ratio_position",
+        "description": "simulation_0616 mixing-ratio mechanism driven by gene position",
+        "root": DATA_ROOT / "simulation_0616_tv_phase" / "ratio_position",
+        "files": {
+            "expression": "expression_data.csv",
+            "view": [],
+            "stage": "cell_stage.csv",
+            "kegg_prior": "kegg_prior.txt",
+            "poswin_prior": "poswin_prior.txt",
+            "ppi_prior": "ppi_prior.csv",
+            "truth_paternal": "E_P.csv",
+            "truth_maternal": "E_M.csv",
+            "truth_ratio": "ratio.csv",
+            "adapter_manifest": "adapter_manifest.json",
+        },
+        "has_ppi": True,
+        "normalize_ppi_stage": False,
+        "have_answer": True,
+        "is_simulation": True,
+    },
+    "simulation0616_ratio_position_kegg": {
+        "name": "simulation0616_ratio_position_kegg",
+        "description": "simulation_0616 mixing-ratio mechanism driven by position and KEGG",
+        "root": DATA_ROOT / "simulation_0616_tv_phase" / "ratio_position_kegg",
+        "files": {
+            "expression": "expression_data.csv",
+            "view": [],
+            "stage": "cell_stage.csv",
+            "kegg_prior": "kegg_prior.txt",
+            "poswin_prior": "poswin_prior.txt",
+            "ppi_prior": "ppi_prior.csv",
+            "truth_paternal": "E_P.csv",
+            "truth_maternal": "E_M.csv",
+            "truth_ratio": "ratio.csv",
+            "adapter_manifest": "adapter_manifest.json",
+        },
+        "has_ppi": True,
+        "normalize_ppi_stage": False,
+        "have_answer": True,
+        "is_simulation": True,
     }
 }
+
+
+def resolve_project_paths(
+    project_root: Optional[Path] = None,
+    data_root: Optional[Path] = None,
+    output_root: Optional[Path] = None,
+) -> Tuple[Path, Path, Path]:
+    """Resolve runtime roots without embedding workstation/server absolute paths."""
+    project = Path(project_root or os.environ.get("TV_PHASE_PROJECT_ROOT", PROJECT_ROOT)).expanduser().resolve()
+    data = Path(data_root or os.environ.get("TV_PHASE_DATA_ROOT", project / "data")).expanduser().resolve()
+    output = Path(output_root or os.environ.get("TV_PHASE_OUTPUT_ROOT", project / "output")).expanduser().resolve()
+    return project, data, output
+
+
+def resolve_dataset_root(dataset_type: str, data_root: Optional[Path] = None) -> Path:
+    if dataset_type not in DATASET_CONFIG:
+        raise ValueError(f"Unknown dataset type: {dataset_type}. Valid types: {list(DATASET_CONFIG)}")
+    configured = Path(DATASET_CONFIG[dataset_type]["root"])
+    if data_root is None:
+        return configured
+    runtime_data_root = Path(data_root).expanduser().resolve()
+    try:
+        relative = configured.resolve().relative_to(DATA_ROOT.resolve())
+    except ValueError:
+        relative = Path(dataset_type)
+    return runtime_data_root / relative
 
 CLUSTER_VERSION_NAMES = {
     "kmeans": "TV_PHASE_v11",
@@ -322,6 +435,10 @@ class PhaseTrainingConfig:
     output_dir: Optional[Path] = None
     device: str = "cpu"
     seed: int = 42
+    project_root: Optional[Path] = None
+    data_root: Optional[Path] = None
+    output_root: Optional[Path] = None
+    legacy_output: bool = False
 
     prior_name: str = "dataset"
     prior_top_k: int = 5

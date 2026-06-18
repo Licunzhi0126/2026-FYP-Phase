@@ -23,6 +23,25 @@ TV_PHASE_FILES = (
 SIMULATION69_FILES = TV_PHASE_FILES + ("simulation69_source_summary.csv",)
 SIMULATION0611_FILES = TV_PHASE_FILES + ("simulation0611_source_summary.csv",)
 SIMULATION0615_FILES = TV_PHASE_FILES + ("simulation0615_source_summary.csv",)
+SIMULATION0616_FILES = (
+    "expression_data.csv",
+    "cell_stage.csv",
+    "kegg_prior.txt",
+    "poswin_prior.txt",
+    "ppi_prior.csv",
+    "E_P.csv",
+    "E_M.csv",
+    "ratio.csv",
+    "adapter_manifest.json",
+    "simulation0616_source_summary.csv",
+)
+
+SIMULATION0616_CASES = {
+    "expr_position": ("expression_correlation_diffcovmatrix", "gene_position"),
+    "expr_position_kegg": ("expression_correlation_diffcovmatrix", "position_with_kegg"),
+    "ratio_position": ("ratio_correlation_diffcov", "gene_position"),
+    "ratio_position_kegg": ("ratio_correlation_diffcov", "position_with_kegg"),
+}
 
 
 def _prepare_output_dir(output_dir: Path, *, overwrite: bool) -> None:
@@ -160,6 +179,21 @@ def _write_simulation69_position_prior(gene_info: pd.DataFrame, output_dir: Path
     )
     pos.to_csv(output_dir / "poswin_prior.txt", sep="\t", header=False, index=False)
     pos.to_csv(output_dir / "gene_positions_pea.txt", sep="\t", header=False, index=False)
+
+
+def _write_simulation0616_position_prior(gene_info: pd.DataFrame, output_dir: Path, genes) -> None:
+    genes = [str(gene).strip() for gene in genes]
+    gene_meta = gene_info.set_index("gene_id").loc[genes].reset_index()
+    pos = pd.DataFrame(
+        {
+            "gene": gene_meta["gene_id"].astype(str),
+            "chr": gene_meta["chromosome"].astype(str),
+            "start": gene_meta["start_pos"].astype(int),
+            "end": gene_meta["end_pos"].astype(int),
+            "strand": "+",
+        }
+    )
+    pos.to_csv(output_dir / "poswin_prior.txt", sep="\t", header=False, index=False)
 
 
 def _write_simulation69_kegg_prior(gene_info: pd.DataFrame, output_dir: Path, genes) -> None:
@@ -599,13 +633,129 @@ def adapt_simulation0615_to_tv_phase(
     return {name: output_dir / name for name in SIMULATION0615_FILES}
 
 
+def adapt_simulation0616_case_to_tv_phase(
+    case_name: str,
+    raw_case_dir,
+    output_dir,
+    *,
+    overwrite: bool = False,
+) -> Dict[str, Path]:
+    if case_name not in SIMULATION0616_CASES:
+        raise ValueError(f"Unknown simulation_0616 case: {case_name}. Valid cases: {list(SIMULATION0616_CASES)}")
+
+    raw_case_dir = Path(raw_case_dir)
+    output_dir = Path(output_dir)
+    source_dir = raw_case_dir / "output" if (raw_case_dir / "output").exists() else raw_case_dir
+    input_dir = source_dir / "input"
+    ground_truth_dir = source_dir / "ground_truth"
+    if not input_dir.exists() or not ground_truth_dir.exists():
+        raise FileNotFoundError(f"Invalid simulation_0616 case directory: {raw_case_dir}")
+
+    _prepare_output_dir_no_delete(output_dir, overwrite=overwrite)
+    expression = _read_simulation_matrix_file(input_dir / "mixed_expression.csv", f"{case_name} mixed expression")
+    e_p = _read_simulation_matrix_file(ground_truth_dir / "paternal_expression.csv", f"{case_name} paternal expression")
+    e_m = _read_simulation_matrix_file(ground_truth_dir / "maternal_expression.csv", f"{case_name} maternal expression")
+    ratio = _read_simulation_matrix_file(ground_truth_dir / "mixing_proportions.csv", f"{case_name} mixing proportions")
+
+    for label, frame in [("paternal", e_p), ("maternal", e_m), ("ratio", ratio)]:
+        if not expression.index.equals(frame.index) or not expression.columns.equals(frame.columns):
+            raise ValueError(f"{case_name} {label} matrix is not aligned to mixed expression")
+
+    gene_info, gene_info_path = _read_simulation69_gene_info(raw_case_dir, input_dir / "gene_info.csv")
+    missing_genes = [gene for gene in expression.columns if gene not in set(gene_info["gene_id"])]
+    if missing_genes:
+        raise ValueError(f"{case_name} gene_info is missing expression genes: {missing_genes[:5]}")
+    gene_info = gene_info.set_index("gene_id").loc[expression.columns.tolist()].reset_index()
+
+    expression.to_csv(output_dir / "expression_data.csv")
+    e_p.to_csv(output_dir / "E_P.csv")
+    e_m.to_csv(output_dir / "E_M.csv")
+    ratio.to_csv(output_dir / "ratio.csv")
+    stage_info = _write_simulation69_cell_stage(
+        output_dir,
+        expression.index.tolist(),
+        cell_info_path=input_dir / "cell_info.csv",
+        missing_stage_label=None,
+    )
+    _write_simulation0616_position_prior(gene_info, output_dir, expression.columns.tolist())
+    _write_simulation69_kegg_prior(gene_info, output_dir, expression.columns.tolist())
+    ppi_info = _write_simulation69_ppi_prior(
+        raw_case_dir,
+        output_dir,
+        expression.columns.tolist(),
+        ppi_path=input_dir / "synthetic_expression_ppi.csv",
+    )
+
+    summary_row = {
+        "case_name": case_name,
+        "raw_case_dir": str(raw_case_dir.resolve()),
+        "output_dir": str(output_dir.resolve()),
+        "n_cells": int(expression.shape[0]),
+        "n_genes": int(expression.shape[1]),
+        "n_pathways": int(gene_info["pathway"].nunique()),
+        "gene_info_source": str(gene_info_path.resolve()),
+        "has_E_P": True,
+        "has_E_M": True,
+        "has_ratio": True,
+        **stage_info,
+        **ppi_info,
+    }
+    pd.DataFrame([summary_row]).to_csv(
+        output_dir / "simulation0616_source_summary.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    manifest = {
+        "schema": "simulation_0616",
+        "case_name": case_name,
+        "raw_case_dir": str(raw_case_dir.resolve()),
+        "source_dir": str(source_dir.resolve()),
+        "output_dir": str(output_dir.resolve()),
+        "files": list(SIMULATION0616_FILES),
+        "shape": {"cells": int(expression.shape[0]), "genes": int(expression.shape[1])},
+        "n_pathways": int(gene_info["pathway"].nunique()),
+        "stage_info": stage_info,
+        "ppi_info": ppi_info,
+    }
+    (output_dir / "adapter_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return {name: output_dir / name for name in SIMULATION0616_FILES}
+
+
+def adapt_simulation0616_to_tv_phase(
+    raw_root,
+    output_root,
+    *,
+    overwrite: bool = False,
+) -> Dict[str, Dict[str, Path]]:
+    raw_root = Path(raw_root)
+    output_root = Path(output_root)
+    nested_root = raw_root / "simulation_0616"
+    source_root = nested_root if nested_root.exists() else raw_root
+    results: Dict[str, Dict[str, Path]] = {}
+    for case_name, (mechanism, scenario) in SIMULATION0616_CASES.items():
+        results[case_name] = adapt_simulation0616_case_to_tv_phase(
+            case_name,
+            source_root / mechanism / scenario,
+            output_root / case_name,
+            overwrite=overwrite,
+        )
+    return results
+
+
 __all__ = [
     "SIMULATION0611_FILES",
     "SIMULATION0615_FILES",
+    "SIMULATION0616_CASES",
+    "SIMULATION0616_FILES",
     "SIMULATION69_FILES",
     "TV_PHASE_FILES",
     "adapt_raw_simulation_to_tv_phase",
     "adapt_simulation0611_to_tv_phase",
     "adapt_simulation0615_to_tv_phase",
+    "adapt_simulation0616_case_to_tv_phase",
+    "adapt_simulation0616_to_tv_phase",
     "adapt_simulation69_to_tv_phase",
 ]

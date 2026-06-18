@@ -474,6 +474,47 @@ def _save_embedding_metrics(
     return df
 
 
+def evaluate_embedding_collection(
+    outputs: Dict[str, np.ndarray],
+    *,
+    truth_embeddings: Optional[Dict[str, np.ndarray]],
+    dataset: DatasetBundle,
+    cluster_method: str,
+    cluster_resolution: Optional[float],
+    sample_names: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Compute embedding metrics without creating output files."""
+    true_ids, _ = _align_labels_to_cells(dataset, sample_names)
+    rows = []
+    groups = [("predicted", outputs)]
+    if truth_embeddings:
+        groups.append(("ground_truth", truth_embeddings))
+    for source, embeddings in groups:
+        for name, embedding in embeddings.items():
+            array = np.asarray(embedding, dtype=np.float32)
+            metrics = _evaluate_embedding_metrics(
+                array,
+                true_ids,
+                dataset_type=dataset.dataset_type,
+                cluster_method=cluster_method,
+                cluster_resolution=cluster_resolution,
+            )
+            rows.append(
+                {
+                    "source": source,
+                    "embedding": name,
+                    "cluster_method": cluster_method,
+                    "pred_clusters": metrics["pred_clusters"],
+                    "fmi": metrics["fmi"],
+                    "nmi": metrics["nmi"],
+                    "ari": metrics["ari"],
+                    "n_cells": int(array.shape[0]),
+                    "n_features": int(array.shape[1]) if array.ndim > 1 else 1,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def _save_run_metadata_phase(
     out_dir: Path,
     *,

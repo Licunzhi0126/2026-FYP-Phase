@@ -37,6 +37,37 @@ When you intentionally want to replace a registered dataset such as
 conda run -n phase python -m tv_phase.experiment
 ```
 
+## Prepare simulation_0616
+
+```powershell
+conda run -n phase python scripts/prepare_simulation0616.py `
+  --input-root data/simulation_0616 `
+  --output-root data/simulation_0616_tv_phase `
+  --overwrite
+```
+
+The adapter registers four independent datasets: `simulation0616_expr_position`,
+`simulation0616_expr_position_kegg`, `simulation0616_ratio_position`, and
+`simulation0616_ratio_position_kegg`.
+
+## Run the prior ablation
+
+```powershell
+conda run -n phase python -m tv_phase.experiment `
+  --dataset-types PEA_STA `
+  --prior-builders dataset none p_glue p_denoise `
+  --cluster-methods kmeans leiden louvain `
+  --data-root data `
+  --output-root output/prior_ablation_v1 `
+  --device cuda
+```
+
+Each run writes only `figures/`, `plot_data/`, `tables/`, `logs/`, and `config/`
+at its top level. Pass `--legacy-output` only when the previous deep output tree is required.
+
+Runtime roots may also be supplied through `TV_PHASE_PROJECT_ROOT`,
+`TV_PHASE_DATA_ROOT`, and `TV_PHASE_OUTPUT_ROOT`.
+
 ## Main API
 
 ```python
