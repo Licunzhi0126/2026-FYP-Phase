@@ -217,7 +217,8 @@ def _write_simulation69_ppi_prior(
     ppi_path: Optional[Path] = None,
 ) -> Dict[str, object]:
     genes = [str(gene).strip() for gene in genes]
-    adjacency = pd.DataFrame(0.0, index=genes, columns=genes)
+    gene_index = {gene: idx for idx, gene in enumerate(genes)}
+    adjacency_values = np.zeros((len(genes), len(genes)), dtype=np.float32)
     ppi_path = Path(ppi_path) if ppi_path is not None else raw_dir / "synthetic_expression_ppi.csv"
     edge_count = 0
     if ppi_path.exists():
@@ -229,15 +230,18 @@ def _write_simulation69_ppi_prior(
         for _, row in edges.iterrows():
             source = str(row["gene1"]).strip()
             target = str(row["gene2"]).strip()
-            if source not in adjacency.index or target not in adjacency.columns or source == target:
+            if source not in gene_index or target not in gene_index or source == target:
                 continue
             weight = 1.0
             if "weight" in edges.columns and pd.notna(row["weight"]):
                 weight = float(abs(row["weight"]))
-            adjacency.loc[source, target] = weight
-            adjacency.loc[target, source] = weight
+            source_idx = gene_index[source]
+            target_idx = gene_index[target]
+            adjacency_values[source_idx, target_idx] = weight
+            adjacency_values[target_idx, source_idx] = weight
             edge_count += 1
-    np.fill_diagonal(adjacency.values, 0.0)
+    np.fill_diagonal(adjacency_values, 0.0)
+    adjacency = pd.DataFrame(adjacency_values, index=genes, columns=genes)
     adjacency.to_csv(output_dir / "ppi_prior.csv")
     return {
         "ppi_source": str(ppi_path.resolve()) if ppi_path.exists() else "",

@@ -41,6 +41,11 @@ class Simulation0616AdapterTests(unittest.TestCase):
                 self.assertTrue(path.exists(), path)
             self.assertFalse((output / "gene_positions_pea.txt").exists())
             self.assertEqual((output / "cell_stage.csv").read_text(encoding="utf-8"), "1,2")
+            adjacency = pd.read_csv(output / "ppi_prior.csv", index_col=0)
+            self.assertEqual(float(adjacency.loc["g1", "g1"]), 0.0)
+            self.assertEqual(float(adjacency.loc["g2", "g2"]), 0.0)
+            self.assertAlmostEqual(float(adjacency.loc["g1", "g2"]), 0.7)
+            self.assertAlmostEqual(float(adjacency.loc["g2", "g1"]), 0.7)
 
 
 if __name__ == "__main__":
