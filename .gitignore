@@ -1,10 +1,16 @@
-# Local datasets and generated results
+# Large and generated project artifacts
 /data/
+/report/
 /output/
-/outputs/
 
-# Python generated files
+# Local platform and Codex metadata
+/__MACOSX/
+/.agents/
+/.git.invalid-backup-*/
+.DS_Store
+
+# Python caches and local environments
 __pycache__/
 *.py[cod]
-*.egg-info/
-src/tv_phase.egg-info/
+.pytest_cache/
+.venv/
