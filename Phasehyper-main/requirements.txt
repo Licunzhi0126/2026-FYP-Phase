@@ -1,0 +1,7 @@
+# verified against Python 3.13
+numpy>=2.2
+pandas>=2.3
+torch>=2.7
+scipy>=1.16
+scikit-learn>=1.7
+matplotlib>=3.10
