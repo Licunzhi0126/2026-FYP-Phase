@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 import numpy as np
 import pandas as pd
 
@@ -20,6 +21,8 @@ if __package__ in {None, ""}:
     from visualization.figure2_metrics import (  # type: ignore
         make_preview_methods,
         pair_metrics,
+        project_baseline_methods,
+        safe_correlation,
     )
     from visualization.figure2_style import (  # type: ignore
         BLUE,
@@ -29,6 +32,7 @@ if __package__ in {None, ""}:
         CMAP_TRUTH_A,
         CMAP_TRUTH_B,
         GOLD,
+        GRID,
         INK,
         PRED_A,
         PRED_B,
@@ -47,7 +51,12 @@ else:
         load_answerdata_contexts,
         read_phase_matrix,
     )
-    from .figure2_metrics import make_preview_methods, pair_metrics
+    from .figure2_metrics import (
+        make_preview_methods,
+        pair_metrics,
+        project_baseline_methods,
+        safe_correlation,
+    )
     from .figure2_style import (
         BLUE,
         CMAP_PRED_A,
@@ -56,6 +65,7 @@ else:
         CMAP_TRUTH_A,
         CMAP_TRUTH_B,
         GOLD,
+        GRID,
         INK,
         PRED_A,
         PRED_B,
@@ -80,7 +90,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--gse45719-pred-b", type=Path)
     parser.add_argument("--gse80810-pred-a", type=Path)
     parser.add_argument("--gse80810-pred-b", type=Path)
-    parser.add_argument("--model-name", default="PhaseHyper")
+    parser.add_argument("--hyperphase-root", type=Path)
+    parser.add_argument("--model-name", default="HyperPhase")
     parser.add_argument("--primary-method")
     parser.add_argument("--n-genes", type=int, default=120)
     parser.add_argument("--heatmap-genes", type=int, default=30)
@@ -88,7 +99,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--min-allelic-reads", type=int, default=2)
     parser.add_argument("--min-gse80810-reads", type=int, default=8)
     parser.add_argument("--min-scoreable-genes", type=int, default=8)
-    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--seed", type=int, default=20260730)
     parser.add_argument("--dpi", type=int, default=300)
     return parser.parse_args()
 
@@ -96,6 +107,14 @@ def _parse_args() -> argparse.Namespace:
 def _prediction_paths(
     args: argparse.Namespace,
 ) -> dict[str, tuple[Path | None, Path | None]]:
+    if args.hyperphase_root is not None:
+        return {
+            dataset: (
+                args.hyperphase_root / dataset / "phase_A.csv",
+                args.hyperphase_root / dataset / "phase_B.csv",
+            )
+            for dataset in ("GSE45719", "GSE80810")
+        }
     return {
         "GSE45719": (args.gse45719_pred_a, args.gse45719_pred_b),
         "GSE80810": (args.gse80810_pred_a, args.gse80810_pred_b),
@@ -107,9 +126,10 @@ def _methods_for_context(
     args: argparse.Namespace,
     external_prediction: tuple[np.ndarray, np.ndarray] | None,
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    methods = make_preview_methods(context.total.to_numpy(dtype=float), args.seed)
-    if "NMF2" in methods:
-        methods["NMF2 preview"] = methods.pop("NMF2")
+    methods = project_baseline_methods(
+        context.total.to_numpy(dtype=float),
+        seed=args.seed,
+    )
 
     if external_prediction is not None:
         methods[args.model_name] = external_prediction
@@ -232,8 +252,8 @@ def _choose_primary_method(
         return args.primary_method
     if args.model_name in methods:
         return args.model_name
-    if "NMF2 preview" in methods:
-        return "NMF2 preview"
+    if "NMF2Factor" in methods:
+        return "NMF2Factor"
     return next(iter(methods))
 
 
@@ -510,6 +530,8 @@ def _plot_major_minor(
     panel_label(axis, "E")
 
 
+# Legacy preview layout retained for callers that imported it directly.
+# The command-line workflow below uses _create_paper_figure.
 def _create_figure(
     contexts: list[ExpressionContext],
     metrics: pd.DataFrame,
@@ -585,6 +607,654 @@ def _create_figure(
     return figure, primary_method
 
 
+def _paper_minmax_rows(matrix_cells_by_genes: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(matrix_cells_by_genes, dtype=float).transpose()
+    logged = np.log1p(np.clip(matrix, 0.0, None))
+    result = np.full_like(logged, np.nan, dtype=float)
+    for row_index, row in enumerate(logged):
+        finite = np.isfinite(row)
+        if not np.any(finite):
+            continue
+        low = float(np.percentile(row[finite], 2))
+        high = float(np.percentile(row[finite], 98))
+        result[row_index, finite] = np.clip(
+            (row[finite] - low) / (high - low + 1e-8),
+            0.0,
+            1.0,
+        )
+    return result
+
+
+def _paper_heatmap(
+    axis: plt.Axes,
+    matrix_cells_by_genes: np.ndarray,
+    cmap,
+    title: str,
+) -> None:
+    image = _paper_minmax_rows(matrix_cells_by_genes)
+    local_cmap = cmap.copy()
+    local_cmap.set_bad("#E8ECF2")
+    axis.imshow(
+        image,
+        aspect="auto",
+        interpolation="nearest",
+        cmap=local_cmap,
+        vmin=0.0,
+        vmax=1.0,
+    )
+    axis.set_title(title, pad=5, fontsize=9.1)
+    axis.set_xticks([])
+    axis.set_yticks([])
+    for spine in axis.spines.values():
+        spine.set_visible(False)
+
+
+def _paper_arrow(axis: plt.Axes, text: str = "") -> None:
+    axis.set_axis_off()
+    axis.annotate(
+        "",
+        xy=(0.92, 0.5),
+        xytext=(0.08, 0.5),
+        arrowprops={
+            "arrowstyle": "-|>",
+            "linewidth": 1.05,
+            "color": "#8B95A5",
+        },
+        xycoords="axes fraction",
+    )
+    if text:
+        axis.text(
+            0.5,
+            0.68,
+            text,
+            ha="center",
+            va="bottom",
+            fontsize=7.1,
+            color="#657084",
+        )
+
+
+def _paper_display_axes(
+    context: ExpressionContext,
+    max_cells: int,
+    max_genes: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    truth_a = context.truth_a.to_numpy(dtype=float)
+    truth_b = context.truth_b.to_numpy(dtype=float)
+    mask = context.score_mask.to_numpy(dtype=bool)
+    supported_a = np.where(mask, truth_a, 0.0).sum(axis=1)
+    supported_total = np.where(mask, truth_a + truth_b, 0.0).sum(axis=1)
+    fraction = np.divide(
+        supported_a,
+        supported_total,
+        out=np.full(len(supported_a), 0.5),
+        where=supported_total > 1e-12,
+    )
+    cell_order = np.argsort(fraction)
+    if len(cell_order) > max_cells:
+        positions = np.linspace(
+            0, len(cell_order) - 1, max_cells
+        ).round().astype(int)
+        cell_order = cell_order[positions]
+
+    total = context.total.to_numpy(dtype=float)
+    gene_score = np.var(np.log1p(np.clip(total, 0.0, None)), axis=0)
+    gene_order = np.argsort(-gene_score)[: min(max_genes, total.shape[1])]
+    return cell_order, gene_order
+
+
+def _paper_subsample(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    maximum: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_flat = np.asarray(x, dtype=float).ravel()
+    y_flat = np.asarray(y, dtype=float).ravel()
+    valid = np.isfinite(x_flat) & np.isfinite(y_flat)
+    x_flat = x_flat[valid]
+    y_flat = y_flat[valid]
+    if len(x_flat) <= maximum:
+        return x_flat, y_flat
+    rng = np.random.default_rng(seed)
+    selected = rng.choice(len(x_flat), size=maximum, replace=False)
+    return x_flat[selected], y_flat[selected]
+
+
+def _plot_paper_panel_a(
+    figure: plt.Figure,
+    slot,
+    context: ExpressionContext,
+    prediction: tuple[np.ndarray, np.ndarray],
+    method: str,
+    args: argparse.Namespace,
+) -> None:
+    nested = GridSpecFromSubplotSpec(
+        1,
+        9,
+        subplot_spec=slot,
+        width_ratios=(1, 1, 0.32, 1.45, 0.32, 1, 1, 0.27, 1.8),
+        wspace=0.16,
+    )
+    cells, genes = _paper_display_axes(
+        context,
+        args.heatmap_cells,
+        args.heatmap_genes,
+    )
+    indexer = np.ix_(cells, genes)
+    total = context.total.to_numpy(dtype=float)[indexer]
+    truth_a = context.truth_a.to_numpy(dtype=float)[indexer]
+    truth_b = context.truth_b.to_numpy(dtype=float)[indexer]
+    mask = context.score_mask.to_numpy(dtype=bool)[indexer]
+    pred_a = prediction[0][indexer]
+    pred_b = prediction[1][indexer]
+
+    axes = [figure.add_subplot(nested[0, index]) for index in range(9)]
+    _paper_heatmap(
+        axes[0],
+        np.where(mask, truth_a, np.nan),
+        CMAP_TRUTH_A,
+        f"Held-out {context.truth_a_label}",
+    )
+    _paper_heatmap(
+        axes[1],
+        np.where(mask, truth_b, np.nan),
+        CMAP_TRUTH_B,
+        f"Held-out {context.truth_b_label}",
+    )
+    _paper_arrow(axes[2], "sum")
+    _paper_heatmap(axes[3], total, CMAP_TOTAL, "Observed total")
+    _paper_arrow(axes[4], f"{method} fit\n(no truth)")
+    _paper_heatmap(axes[5], pred_a, CMAP_PRED_A, "Recovered P1")
+    _paper_heatmap(axes[6], pred_b, CMAP_PRED_B, "Recovered P2")
+    _paper_arrow(axes[7], "post-hoc\nscore")
+
+    full_mask = context.score_mask.to_numpy(dtype=bool)
+    full_truth_a = context.truth_a.to_numpy(dtype=float)
+    x_values, y_values = _paper_subsample(
+        np.log1p(full_truth_a[full_mask]),
+        np.log1p(np.clip(prediction[0][full_mask], 0.0, None)),
+        maximum=6000,
+        seed=args.seed,
+    )
+    axes[8].scatter(
+        x_values,
+        y_values,
+        s=7,
+        alpha=0.22,
+        color=BLUE,
+        linewidths=0,
+        rasterized=True,
+    )
+    limit = max(
+        float(np.nanmax(x_values)) if len(x_values) else 0.0,
+        float(np.nanmax(y_values)) if len(y_values) else 0.0,
+        1.0,
+    )
+    axes[8].plot(
+        [0, limit],
+        [0, limit],
+        linestyle="--",
+        linewidth=0.9,
+        color="#8F98A7",
+    )
+    correlation = safe_correlation(x_values, y_values)
+    axes[8].text(
+        0.95,
+        0.08,
+        f"Pearson r = {correlation:.3f}",
+        transform=axes[8].transAxes,
+        ha="right",
+        color=BLUE,
+        fontweight="bold",
+        fontsize=9.1,
+    )
+    axes[8].set_xlabel(f"Held-out {context.truth_a_label}, log1p")
+    axes[8].set_ylabel("Oriented P1, log1p")
+    axes[8].set_title("Post-hoc scoring")
+    clean_axis(axes[8], grid_axis="both")
+
+    first_position = axes[0].get_position()
+    second_position = axes[1].get_position()
+    fifth_position = axes[5].get_position()
+    sixth_position = axes[6].get_position()
+    figure.text(
+        first_position.x0 - 0.024,
+        first_position.y1 + 0.018,
+        "A",
+        fontsize=14,
+        fontweight="bold",
+        ha="left",
+        va="bottom",
+        color=INK,
+    )
+    figure.text(
+        (first_position.x0 + second_position.x1) / 2,
+        first_position.y1 + 0.018,
+        "Allele-resolved held-out truth",
+        ha="center",
+        va="bottom",
+        fontsize=9.5,
+        color=INK,
+    )
+    figure.text(
+        (fifth_position.x0 + sixth_position.x1) / 2,
+        fifth_position.y1 + 0.018,
+        f"{method}-recovered exchangeable phases",
+        ha="center",
+        va="bottom",
+        fontsize=9.5,
+        color=INK,
+    )
+
+
+def _paper_context_label(name: str) -> str:
+    return (
+        name.replace("GSE45719 ", "45719 ")
+        .replace("GSE80810 ", "80810 ")
+        .replace("blastocyst", "blast.")
+    )
+
+
+def _plot_paper_panel_b(
+    axis: plt.Axes,
+    metrics: pd.DataFrame,
+    methods: list[str],
+    contexts: list[str],
+    model_name: str,
+) -> None:
+    width = min(0.18, 0.82 / max(1, len(methods)))
+    x = np.arange(len(contexts))
+    for method_index, method in enumerate(methods):
+        values = []
+        for context in contexts:
+            subset = metrics[
+                (metrics["context"] == context)
+                & (metrics["method"] == method)
+            ]
+            values.append(float(subset["nmse"].iloc[0]) if len(subset) else np.nan)
+        offset = (method_index - (len(methods) - 1) / 2) * width
+        bars = axis.bar(
+            x + offset,
+            values,
+            width=width * 0.92,
+            color=method_color(method, method_index),
+            label=method,
+            zorder=3,
+        )
+        if method == model_name:
+            for bar, value in zip(bars, values):
+                axis.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{value:.2f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=6.6,
+                    color=method_color(method, method_index),
+                )
+    axis.set_xticks(x)
+    axis.set_xticklabels(
+        [_paper_context_label(context) for context in contexts],
+        rotation=35,
+        ha="right",
+        fontsize=6.8,
+    )
+    axis.set_ylabel("Phase-fit normalized MSE")
+    axis.set_title("Phase-fit reconstruction error")
+    clean_axis(axis)
+    panel_label(axis, "B")
+    axis.legend(
+        ncol=2,
+        loc="upper left",
+        bbox_to_anchor=(0, -0.27),
+        columnspacing=1.0,
+        handlelength=1.3,
+        fontsize=7,
+    )
+
+
+def _plot_paper_panel_c(
+    axis: plt.Axes,
+    metrics: pd.DataFrame,
+    methods: list[str],
+    contexts: list[str],
+    model_name: str,
+) -> None:
+    y = np.arange(len(contexts))
+    offsets = (
+        np.linspace(-0.20, 0.20, len(methods))
+        if len(methods) > 1
+        else np.asarray([0.0])
+    )
+    finite_values = metrics["pearson"].to_numpy(dtype=float)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    minimum = (
+        max(-0.05, float(np.min(finite_values)) - 0.08)
+        if len(finite_values)
+        else -0.05
+    )
+    maximum = (
+        min(1.02, float(np.max(finite_values)) + 0.14)
+        if len(finite_values)
+        else 1.02
+    )
+    for context_index, context in enumerate(contexts):
+        axis.hlines(
+            context_index,
+            minimum,
+            maximum,
+            color=GRID,
+            linewidth=1.0,
+            zorder=0,
+        )
+        for method_index, method in enumerate(methods):
+            subset = metrics[
+                (metrics["context"] == context)
+                & (metrics["method"] == method)
+            ]
+            if subset.empty:
+                continue
+            value = float(subset["pearson"].iloc[0])
+            yy = context_index + offsets[method_index]
+            axis.scatter(
+                value,
+                yy,
+                s=34,
+                color=method_color(method, method_index),
+                edgecolor="white",
+                linewidth=0.6,
+                zorder=3,
+            )
+            axis.text(
+                value + 0.012,
+                yy,
+                f"r={value:.3f}",
+                va="center",
+                ha="left",
+                fontsize=6.4,
+                color=method_color(method, method_index),
+                fontweight="bold" if method == model_name else "normal",
+            )
+    axis.set_yticks(y)
+    axis.set_yticklabels(
+        [_paper_context_label(context) for context in contexts],
+        fontsize=7,
+    )
+    axis.set_xlim(minimum, maximum)
+    axis.set_xlabel("Held-out phase-fit Pearson r")
+    axis.set_title("Pearson agreement (all values shown)")
+    clean_axis(axis, grid_axis="x")
+    panel_label(axis, "C")
+
+
+def _plot_paper_panel_d(
+    axis: plt.Axes,
+    context: ExpressionContext,
+    prediction: tuple[np.ndarray, np.ndarray],
+    method: str,
+) -> None:
+    gene_index = _representative_gene(context)
+    gene = context.total.columns[gene_index]
+    truth_a = context.truth_a.iloc[:, gene_index].to_numpy(dtype=float)
+    truth_b = context.truth_b.iloc[:, gene_index].to_numpy(dtype=float)
+    pred_a = prediction[0][:, gene_index]
+    pred_b = prediction[1][:, gene_index]
+    mask = context.score_mask.iloc[:, gene_index].to_numpy(dtype=bool)
+    fraction = np.divide(
+        truth_a,
+        truth_a + truth_b,
+        out=np.full_like(truth_a, 0.5),
+        where=(truth_a + truth_b) > 1e-12,
+    )
+    order = np.argsort(fraction)
+    x = np.arange(len(order))
+
+    axis.plot(
+        x,
+        truth_a[order],
+        color=TRUTH_A,
+        label=f"Held-out {context.truth_a_label}",
+        linewidth=1.45,
+    )
+    axis.plot(
+        x,
+        truth_b[order],
+        color=TRUTH_B,
+        label=f"Held-out {context.truth_b_label}",
+        linewidth=1.45,
+    )
+    axis.scatter(
+        x,
+        pred_a[order],
+        color=PRED_A,
+        label=f"{method} P1",
+        s=11,
+        alpha=0.70,
+        linewidths=0,
+    )
+    axis.scatter(
+        x,
+        pred_b[order],
+        color=PRED_B,
+        label=f"{method} P2",
+        s=11,
+        alpha=0.70,
+        linewidths=0,
+    )
+    r_a = safe_correlation(pred_a[mask], truth_a[mask])
+    r_b = safe_correlation(pred_b[mask], truth_b[mask])
+    axis.text(
+        0.03,
+        0.95,
+        f"rA={r_a:.3f}\nrB={r_b:.3f}",
+        transform=axis.transAxes,
+        va="top",
+        fontweight="bold",
+        color=INK,
+    )
+    axis.set_xlabel(f"Cells sorted by held-out {context.truth_a_label} fraction")
+    axis.set_ylabel("Expression")
+    axis.set_title(f"Representative high-imbalance reconstruction: {gene}")
+    clean_axis(axis)
+    panel_label(axis, "D")
+    axis.legend(
+        ncol=2,
+        loc="upper center",
+        bbox_to_anchor=(0.60, 1.0),
+        fontsize=7,
+    )
+
+
+def _plot_paper_panel_e(
+    axis: plt.Axes,
+    context: ExpressionContext,
+    prediction: tuple[np.ndarray, np.ndarray],
+    method: str,
+    seed: int,
+) -> None:
+    mask = context.score_mask.to_numpy(dtype=bool)
+    truth_a = context.truth_a.to_numpy(dtype=float)
+    truth_b = context.truth_b.to_numpy(dtype=float)
+    pred_a, pred_b = prediction
+    truth_major = np.maximum(truth_a, truth_b)[mask]
+    truth_minor = np.minimum(truth_a, truth_b)[mask]
+    pred_major = np.maximum(pred_a, pred_b)[mask]
+    pred_minor = np.minimum(pred_a, pred_b)[mask]
+
+    major_x, major_y = _paper_subsample(
+        np.log1p(truth_major),
+        np.log1p(np.clip(pred_major, 0.0, None)),
+        maximum=5000,
+        seed=seed,
+    )
+    minor_x, minor_y = _paper_subsample(
+        np.log1p(truth_minor),
+        np.log1p(np.clip(pred_minor, 0.0, None)),
+        maximum=5000,
+        seed=seed + 1,
+    )
+    axis.scatter(
+        major_x,
+        major_y,
+        s=7,
+        alpha=0.20,
+        color=BLUE,
+        linewidths=0,
+        label="Major",
+        rasterized=True,
+    )
+    axis.scatter(
+        minor_x,
+        minor_y,
+        s=7,
+        alpha=0.20,
+        color=GOLD,
+        linewidths=0,
+        label="Minor",
+        rasterized=True,
+    )
+    limit = max(
+        float(np.max(major_x)) if len(major_x) else 0.0,
+        float(np.max(major_y)) if len(major_y) else 0.0,
+        float(np.max(minor_x)) if len(minor_x) else 0.0,
+        float(np.max(minor_y)) if len(minor_y) else 0.0,
+        1.0,
+    )
+    axis.plot(
+        [0, limit],
+        [0, limit],
+        linestyle="--",
+        linewidth=0.9,
+        color="#8F98A7",
+    )
+    axis.text(
+        0.04,
+        0.95,
+        f"major Pearson r = {safe_correlation(major_x, major_y):.3f}\n"
+        f"minor Pearson r = {safe_correlation(minor_x, minor_y):.3f}",
+        transform=axis.transAxes,
+        va="top",
+        fontweight="bold",
+        color=INK,
+    )
+    axis.set_xlabel("Held-out allele expression, log1p")
+    axis.set_ylabel(f"{method}-oriented expression, log1p")
+    axis.set_title("Label-invariant major/minor recovery")
+    clean_axis(axis, grid_axis="both")
+    panel_label(axis, "E")
+    axis.legend(loc="lower right")
+
+
+def _create_paper_figure(
+    contexts: list[ExpressionContext],
+    metrics: pd.DataFrame,
+    oriented: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]],
+    args: argparse.Namespace,
+) -> tuple[plt.Figure, str]:
+    apply_style()
+    primary = contexts[0]
+    primary_method = _choose_primary_method(oriented[primary.name], args)
+    primary_prediction = oriented[primary.name][primary_method]
+    preferred_methods = [
+        args.model_name,
+        "NMF2Factor",
+        "RandomSplit",
+        "MeanFractionShrinkage",
+    ]
+    available = metrics["method"].drop_duplicates().tolist()
+    methods = [method for method in preferred_methods if method in available]
+    methods.extend(method for method in available if method not in methods)
+    context_names = [context.name for context in contexts]
+
+    figure = plt.figure(figsize=(15.6, 10.7))
+    figure.suptitle(
+        "Primary scoreable-gene phase-truth benchmark recovery from total expression",
+        x=0.04,
+        y=0.995,
+        ha="left",
+        fontsize=16,
+        fontweight="bold",
+        color=INK,
+    )
+    figure.text(
+        0.04,
+        0.968,
+        (
+            f"Actual HyperPhaseModel · {primary.name} · truth used only after "
+            "decomposition for orientation/scoring"
+            if primary_method == args.model_name
+            else f"Baseline-only display · {primary.name} · {primary_method}"
+        ),
+        ha="left",
+        fontsize=9.3,
+        color="#606B7D",
+    )
+    outer = GridSpec(
+        3,
+        2,
+        figure=figure,
+        height_ratios=(1.17, 1.0, 1.08),
+        hspace=0.48,
+        wspace=0.27,
+        left=0.05,
+        right=0.985,
+        top=0.92,
+        bottom=0.08,
+    )
+    _plot_paper_panel_a(
+        figure,
+        outer[0, :],
+        primary,
+        primary_prediction,
+        primary_method,
+        args,
+    )
+    axis_b = figure.add_subplot(outer[1, 0])
+    axis_c = figure.add_subplot(outer[1, 1])
+    axis_d = figure.add_subplot(outer[2, 0])
+    axis_e = figure.add_subplot(outer[2, 1])
+    _plot_paper_panel_b(
+        axis_b,
+        metrics,
+        methods,
+        context_names,
+        args.model_name,
+    )
+    _plot_paper_panel_c(
+        axis_c,
+        metrics,
+        methods,
+        context_names,
+        args.model_name,
+    )
+    _plot_paper_panel_d(
+        axis_d,
+        primary,
+        primary_prediction,
+        primary_method,
+    )
+    _plot_paper_panel_e(
+        axis_e,
+        primary,
+        primary_prediction,
+        primary_method,
+        args.seed,
+    )
+    add_caption(
+        figure,
+        "A, held-out allele truth is excluded from fitting and introduced only "
+        "for post-hoc orientation/scoring. B, normalized phase-fit MSE. "
+        "C, phase-fit Pearson r with every value printed. D, representative "
+        "gene reconstruction with per-channel r. E, major/minor recovery. "
+        "Controls are called directly from phasehyper/evaluation/saber.py; "
+        "low-read entries are excluded by the shared scoring mask.",
+        y=0.014,
+    )
+    return figure, primary_method
+
+
 def _data_summary(contexts: list[ExpressionContext]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for context in contexts:
@@ -619,12 +1289,17 @@ def main() -> None:
         min_scoreable_genes=args.min_scoreable_genes,
     )
     metrics, oriented = _evaluate(contexts, args)
-    figure, primary_method = _create_figure(contexts, metrics, oriented, args)
+    figure, primary_method = _create_paper_figure(
+        contexts,
+        metrics,
+        oriented,
+        args,
+    )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     save_figure(
         figure,
-        args.output_dir / "answerdata_figure2",
+        args.output_dir / "answerdata_figure2_hyperphase",
         dpi=args.dpi,
     )
     plt.close(figure)
@@ -639,7 +1314,7 @@ def main() -> None:
     primary = contexts[0]
     pred_a, pred_b = oriented[primary.name][primary_method]
     np.savez_compressed(
-        args.output_dir / "answerdata_primary_arrays.npz",
+        args.output_dir / "answerdata_hyperphase_arrays.npz",
         total=primary.total.to_numpy(dtype=float),
         truth_a=primary.truth_a.to_numpy(dtype=float),
         truth_b=primary.truth_b.to_numpy(dtype=float),

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import importlib.util
+from pathlib import Path
 
 import numpy as np
 from sklearn.decomposition import NMF
@@ -14,6 +16,8 @@ class PairMetrics:
     mse: float
     nmse: float
     pearson: float
+    pearson_a: float
+    pearson_b: float
     major_r: float
     minor_r: float
     imbalance_r: float
@@ -137,6 +141,16 @@ def pair_metrics(
     mse = float(np.mean((prediction - truth) ** 2))
     truth_energy = float(np.mean(truth**2))
     nmse = mse / max(truth_energy, 1e-12)
+    pearson_a = safe_correlation(oriented_a[valid], truth_a[valid])
+    pearson_b = safe_correlation(oriented_b[valid], truth_b[valid])
+    finite_channel_correlations = [
+        value for value in (pearson_a, pearson_b) if np.isfinite(value)
+    ]
+    aggregate_pearson = (
+        float(np.mean(finite_channel_correlations))
+        if finite_channel_correlations
+        else float("nan")
+    )
 
     truth_major = np.maximum(truth_a, truth_b)
     truth_minor = np.minimum(truth_a, truth_b)
@@ -195,7 +209,9 @@ def pair_metrics(
     metrics = PairMetrics(
         mse=mse,
         nmse=nmse,
-        pearson=safe_correlation(prediction, truth),
+        pearson=aggregate_pearson,
+        pearson_a=pearson_a,
+        pearson_b=pearson_b,
         major_r=safe_correlation(pred_major[valid], truth_major[valid]),
         minor_r=safe_correlation(pred_minor[valid], truth_minor[valid]),
         imbalance_r=safe_correlation(
@@ -218,6 +234,59 @@ def pair_metrics(
         auprc_b=auprc_b,
     )
     return metrics, oriented_a, oriented_b
+
+
+def _load_project_saber_module():
+    """Load the baseline implementations from the user's model code."""
+
+    script_dir = Path(__file__).resolve().parent
+    source = (
+        script_dir.parents[1]
+        / "Phasehyper-main"
+        / "phasehyper"
+        / "evaluation"
+        / "saber.py"
+    )
+    if not source.exists():
+        raise FileNotFoundError(f"Project Saber baseline source not found: {source}")
+    specification = importlib.util.spec_from_file_location(
+        "_phasehyper_project_saber",
+        source,
+    )
+    if specification is None or specification.loader is None:
+        raise ImportError(f"Could not load project Saber baselines from {source}")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def project_baseline_methods(
+    total: np.ndarray,
+    *,
+    seed: int = 20260730,
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Call the three controls already defined in evaluation/saber.py."""
+
+    module = _load_project_saber_module()
+    observed = np.asarray(total, dtype=float)
+    methods: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+    phase_a, phase_b = module.baseline_nmf2(observed, seed)
+    methods["NMF2Factor"] = (
+        np.asarray(phase_a, dtype=float),
+        np.asarray(phase_b, dtype=float),
+    )
+    phase_a, phase_b = module.baseline_random_split(observed, seed)
+    methods["RandomSplit"] = (
+        np.asarray(phase_a, dtype=float),
+        np.asarray(phase_b, dtype=float),
+    )
+    phase_a, phase_b = module.baseline_mean_fraction_shrinkage(observed)
+    methods["MeanFractionShrinkage"] = (
+        np.asarray(phase_a, dtype=float),
+        np.asarray(phase_b, dtype=float),
+    )
+    return methods
 
 
 def make_preview_methods(

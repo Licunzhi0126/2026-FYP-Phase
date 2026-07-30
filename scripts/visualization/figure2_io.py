@@ -107,18 +107,22 @@ def _development_group(stage: str) -> str:
 
 def _select_expression_genes(
     total: pd.DataFrame,
-    score_mask: pd.DataFrame,
     n_genes: int,
-    min_scoreable_cells: int,
+    min_detected_cells: int = 5,
 ) -> list[str]:
-    """Select variable genes without looking at parental labels or predictions."""
+    """Select variable genes from observed total expression only.
 
-    availability = score_mask.sum(axis=0)
-    candidates = availability.index[availability >= min_scoreable_cells]
+    The held-out allelic channels and their read-support mask are intentionally
+    absent from this function so they cannot influence the axes used for model
+    fitting.
+    """
+
+    detected = (total > 0).sum(axis=0)
+    candidates = detected.index[detected >= min_detected_cells]
     if len(candidates) < min(n_genes, total.shape[1]):
-        candidates = availability.index[availability > 0]
+        candidates = detected.index[detected > 0]
     if len(candidates) == 0:
-        raise ValueError("No genes have informative allelic read support.")
+        raise ValueError("No genes have positive observed total expression.")
 
     logged = np.log1p(total.loc[:, candidates].clip(lower=0.0))
     score = logged.var(axis=0) + 0.05 * logged.mean(axis=0)
@@ -194,12 +198,9 @@ def load_gse45719(
 
     allelic_reads = c57 + cast
     score_mask = allelic_reads >= min_allelic_reads
-    retained_cells = score_mask.index[score_mask.sum(axis=1) >= min_scoreable_genes]
+    retained_cells = total.index[(total > 0).sum(axis=1) > 0]
     if len(retained_cells) == 0:
-        raise ValueError(
-            "GSE45719 has no cells with enough allele-informative genes; "
-            "lower --min-allelic-reads or --min-scoreable-genes."
-        )
+        raise ValueError("GSE45719 has no cells with positive total expression.")
     total = total.loc[retained_cells]
     c57 = c57.loc[retained_cells]
     cast = cast.loc[retained_cells]
@@ -207,9 +208,8 @@ def load_gse45719(
 
     genes = _select_expression_genes(
         total,
-        score_mask,
         n_genes=n_genes,
-        min_scoreable_cells=max(3, min(8, len(retained_cells) // 4)),
+        min_detected_cells=max(3, min(8, len(retained_cells) // 4)),
     )
     total = total.loc[:, genes]
     c57 = c57.loc[:, genes]
@@ -428,23 +428,17 @@ def load_gse80810(
     )
     ratio = ratio.clip(lower=0.0, upper=1.0).where(score_mask, 0.5).fillna(0.5)
 
-    retained_samples = score_mask.index[
-        score_mask.sum(axis=1) >= min_scoreable_genes
-    ]
+    retained_samples = total.index[(total > 0).sum(axis=1) > 0]
     if len(retained_samples) == 0:
-        raise ValueError(
-            "GSE80810 has no cells with enough allele-informative genes; "
-            "lower --min-gse80810-reads or --min-scoreable-genes."
-        )
+        raise ValueError("GSE80810 has no samples with positive total expression.")
     total = total.loc[retained_samples]
     ratio = ratio.loc[retained_samples]
     score_mask = score_mask.loc[retained_samples]
 
     genes = _select_expression_genes(
         total,
-        score_mask,
         n_genes=n_genes,
-        min_scoreable_cells=max(3, min(8, len(retained_samples) // 4)),
+        min_detected_cells=max(3, min(8, len(retained_samples) // 4)),
     )
     total = total.loc[:, genes]
     ratio = ratio.loc[:, genes]

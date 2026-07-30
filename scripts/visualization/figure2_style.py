@@ -27,11 +27,15 @@ PRED_A = BLUE
 PRED_B = TEAL
 
 METHOD_COLORS = {
+    "HyperPhase": BLUE,
+    "NMF2Factor": GOLD,
+    "RandomSplit": RED,
+    "MeanFractionShrinkage": SLATE,
+    # Backward-compatible names retained for older preview-only workflows.
     "PhaseHyper": BLUE,
     "NMF2 preview": TEAL,
     "StateSplit": GOLD,
     "RankSplit": PURPLE,
-    "RandomSplit": RED,
     "EqualSplit": SLATE,
 }
 
