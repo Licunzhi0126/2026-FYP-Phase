@@ -1,4 +1,4 @@
-"""Shared plotting style for simulation visualizations."""
+"""Shared plotting style for visualization modules."""
 from __future__ import annotations
 
 from pathlib import Path

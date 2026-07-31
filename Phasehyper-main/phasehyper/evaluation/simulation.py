@@ -37,7 +37,49 @@ def _expression_summary(
     *,
     to_dc: ArrayTransform | None,
     orientation: dict,
+    observed_mask: np.ndarray | None = None,
 ) -> dict[str, float | str | bool]:
+    if observed_mask is not None and not np.asarray(observed_mask, dtype=bool).all():
+        mask = np.asarray(observed_mask, dtype=bool)
+        pred_a, pred_b = phase_a, phase_b
+        true_a, true_b = maternal, paternal
+        imb_pred = (phase_a - phase_b) / (np.abs(phase_a + phase_b) + 1e-8)
+        imb_true = (maternal - paternal) / (maternal + paternal + 1e-8)
+
+        def corr(x, y, keep):
+            x, y = np.asarray(x)[keep], np.asarray(y)[keep]
+            if x.size < 2 or np.std(x) < 1e-12 or np.std(y) < 1e-12:
+                return np.nan
+            return float(pearsonr(x, y)[0])
+
+        cell_a = [corr(pred_a[i], true_a[i], mask[i]) for i in range(len(mask))]
+        cell_b = [corr(pred_b[i], true_b[i], mask[i]) for i in range(len(mask))]
+        cell_imb = [
+            corr(imb_pred[i], imb_true[i], mask[i]) for i in range(len(mask))
+        ]
+        gene_pred = np.array([
+            np.nanmean(np.where(mask[:, j], imb_pred[:, j], np.nan))
+            for j in range(mask.shape[1])
+        ])
+        gene_true = np.array([
+            np.nanmean(np.where(mask[:, j], imb_true[:, j], np.nan))
+            for j in range(mask.shape[1])
+        ])
+        gene_ok = np.isfinite(gene_pred) & np.isfinite(gene_true)
+        return {
+            "swapped": bool(orientation["n_swapped"]),
+            "assign": "P2=A" if orientation["n_swapped"] else "P1=A",
+            "pcc_mat": corr(pred_a, true_a, mask),
+            "pcc_pat": corr(pred_b, true_b, mask),
+            "cell_pcc_mat": float(np.nanmean(cell_a)),
+            "cell_pcc_pat": float(np.nanmean(cell_b)),
+            "imb_pcc": corr(imb_pred, imb_true, mask),
+            "imb_gene_pcc": corr(gene_pred, gene_true, gene_ok),
+            "imb_cell_pcc": float(np.nanmean(cell_imb)),
+            "imb_mae": float(np.mean(np.abs(imb_pred[mask] - imb_true[mask]))),
+            "imb_mag_pred": float(np.mean(np.abs(imb_pred[mask]))),
+            "imb_mag_true": float(np.mean(np.abs(imb_true[mask]))),
+        }
     pred_a = to_dc(phase_a) if to_dc is not None else phase_a
     pred_b = to_dc(phase_b) if to_dc is not None else phase_b
     true_a = to_dc(maternal) if to_dc is not None else maternal
@@ -79,6 +121,7 @@ def evaluate_simulation_expression(
     method_name: str = "phasehyper",
     pre_sync_phase_a: np.ndarray | None = None,
     pre_sync_phase_b: np.ndarray | None = None,
+    observed_mask: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Run the complete post-training expression decomposition evaluation."""
     values = _as_matching_arrays(
@@ -93,12 +136,32 @@ def evaluate_simulation_expression(
     maternal = values["maternal_true"]
     paternal = values["paternal_true"]
     combined_values = values["combined"]
+    resolved_mask = None
+    if observed_mask is not None:
+        resolved_mask = np.asarray(observed_mask, dtype=bool)
+        if resolved_mask.shape != combined_values.shape:
+            raise ValueError(
+                f"observed_mask shape {resolved_mask.shape} does not match "
+                f"evaluation shape {combined_values.shape}"
+            )
+        resolved_mask &= np.isfinite(maternal) & np.isfinite(paternal)
+        if not resolved_mask.any():
+            raise ValueError("observed_mask contains no evaluable entries")
+        if resolved_mask.all():
+            resolved_mask = None
+        elif to_dc is not None:
+            raise ValueError(
+                "to_dc cannot be used with partially observed reference matrices"
+            )
     oriented_a, oriented_b, orientation = saber.orient(
-        raw_a, raw_b, maternal, paternal, "global"
+        raw_a, raw_b, maternal, paternal, "global", resolved_mask
     )
 
     saber_rows = [
-        saber.phase_metrics(raw_a, raw_b, maternal, paternal, method_name)
+        saber.phase_metrics(
+            raw_a, raw_b, maternal, paternal, method_name,
+            observed_mask=resolved_mask,
+        )
     ]
     baselines = saber.run_baselines(
         combined_values,
@@ -106,6 +169,7 @@ def evaluate_simulation_expression(
         paternal,
         seed=seed,
         proj=projection,
+        observed_mask=resolved_mask,
     )
     saber_rows.extend(_rename_trivial(baselines))
 
@@ -113,12 +177,20 @@ def evaluate_simulation_expression(
     perfect = (project(maternal), project(paternal))
     saber_rows.append(
         saber.phase_metrics(
-            perfect[0], perfect[1], maternal, paternal, "[floor] perfect@rank-dc"
+            perfect[0],
+            perfect[1],
+            maternal,
+            paternal,
+            "[floor] perfect@rank-dc",
+            observed_mask=resolved_mask,
         )
     )
 
     headline_rows = [
-        saber.headline(raw_a, raw_b, maternal, paternal, method_name, to_dc)
+        saber.headline(
+            raw_a, raw_b, maternal, paternal, method_name, to_dc,
+            observed_mask=resolved_mask,
+        )
     ]
     half = combined_values * 0.5
     for name, pair in (
@@ -134,6 +206,7 @@ def evaluate_simulation_expression(
                 paternal,
                 name,
                 to_dc,
+                observed_mask=resolved_mask,
             )
         )
     headline_rows.append(
@@ -144,11 +217,12 @@ def evaluate_simulation_expression(
             paternal,
             "[floor] perfect@rank-dc",
             to_dc,
+            observed_mask=resolved_mask,
         )
     )
 
     orientation_rows = saber.orientation_audit(
-        raw_a, raw_b, maternal, paternal, method_name
+        raw_a, raw_b, maternal, paternal, method_name, resolved_mask
     )
     pre_sync_rows = None
     if (pre_sync_phase_a is None) != (pre_sync_phase_b is None):
@@ -161,7 +235,8 @@ def evaluate_simulation_expression(
             paternal=paternal,
         )
         pre_sync_rows = saber.orientation_audit(
-            pre["phase_a"], pre["phase_b"], maternal, paternal, "no-sync"
+            pre["phase_a"], pre["phase_b"], maternal, paternal, "no-sync",
+            resolved_mask,
         )
 
     return {
@@ -180,6 +255,7 @@ def evaluate_simulation_expression(
             paternal,
             to_dc=to_dc,
             orientation=orientation,
+            observed_mask=resolved_mask,
         ),
     }
 

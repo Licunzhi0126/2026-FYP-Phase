@@ -19,7 +19,7 @@ SABER_CSV_FIELDS = [
     "pcc_cell_A", "pcc_cell_B", "cos_A", "cos_B", "mse_A", "mse_B",
     "imb", "imb_gene", "auroc", "mse", "pearson", "imb_spearman", "imb_pcc",
     "imb_gene_pcc", "imb_auroc", "imb_auprc", "major_r", "minor_r",
-    "mean_imb_pred", "mean_imb_true", "orient_level",
+    "mean_imb_pred", "mean_imb_true", "orient_level", "evaluation_space",
 ]
 
 

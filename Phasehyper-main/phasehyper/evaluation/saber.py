@@ -39,13 +39,45 @@ HIGH_IMB_QUANTILE = 0.75   # top quartile of true mean |imbalance| = positives
 MIN_SUPPORT_Q = 0.05
 
 
-def _support_mask(A_true, B_true, signed=False):
+def _resolved_observed_mask(A_true, B_true, observed_mask=None):
+    """Return None for the legacy fully-observed path, else a finite bool mask."""
+    finite = np.isfinite(A_true) & np.isfinite(B_true)
+    if observed_mask is None:
+        return None if finite.all() else finite
+    mask = np.asarray(observed_mask, dtype=bool)
+    if mask.shape != np.asarray(A_true).shape:
+        raise ValueError(
+            f"observed_mask shape {mask.shape} does not match truth shape "
+            f"{np.asarray(A_true).shape}"
+        )
+    mask = mask & finite
+    return None if mask.all() else mask
+
+
+def _safe_corr(x, y):
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 2 or np.std(x[ok]) < 1e-12 or np.std(y[ok]) < 1e-12:
+        return np.nan
+    return float(pearsonr(x[ok], y[ok])[0])
+
+
+def _support_mask(A_true, B_true, signed=False, observed_mask=None):
     """signed=True for GRN weights, which are ~23% negative. There A+B is not a
     magnitude and can sit near zero for large |A|,|B|, so both the support mask
     and the imbalance ratio must be built on |A|+|B| instead. Using the
     expression form on signed data makes every ratio metric n/a."""
     total = (np.abs(A_true) + np.abs(B_true)) if signed else (A_true + B_true)
-    return total >= np.quantile(total, MIN_SUPPORT_Q)
+    observed = _resolved_observed_mask(A_true, B_true, observed_mask)
+    if observed is None:
+        return total >= np.quantile(total, MIN_SUPPORT_Q)
+    support = np.zeros_like(observed, dtype=bool)
+    if observed.any():
+        support[observed] = total[observed] >= np.quantile(
+            total[observed], MIN_SUPPORT_Q
+        )
+    return support
 
 
 def _imbalance(A, B, signed=False):
@@ -54,7 +86,7 @@ def _imbalance(A, B, signed=False):
     return (A - B) / (np.abs(A + B) + 1e-9)
 
 
-def orient(A_pred, B_pred, A_true, B_true, level="global"):
+def orient(A_pred, B_pred, A_true, B_true, level="global", observed_mask=None):
     """Post-hoc orientation. Phase1/Phase2 are exchangeable labels, so the pair
     must be matched to the references before scoring. This consumes ground
     truth and is therefore scoring, never fitting.
@@ -71,17 +103,43 @@ def orient(A_pred, B_pred, A_true, B_true, level="global"):
     if level == "raw":
         return A_pred, B_pred, dict(level="raw", bits=0, n_swapped=0)
 
+    observed = _resolved_observed_mask(A_true, B_true, observed_mask)
+
     if level == "global":
-        e1 = np.mean((A_pred - A_true) ** 2) + np.mean((B_pred - B_true) ** 2)
-        e2 = np.mean((A_pred - B_true) ** 2) + np.mean((B_pred - A_true) ** 2)
+        if observed is None:
+            e1 = np.mean((A_pred - A_true) ** 2) + np.mean((B_pred - B_true) ** 2)
+            e2 = np.mean((A_pred - B_true) ** 2) + np.mean((B_pred - A_true) ** 2)
+        elif observed.any():
+            e1 = np.mean((A_pred[observed] - A_true[observed]) ** 2) + np.mean(
+                (B_pred[observed] - B_true[observed]) ** 2
+            )
+            e2 = np.mean((A_pred[observed] - B_true[observed]) ** 2) + np.mean(
+                (B_pred[observed] - A_true[observed]) ** 2
+            )
+        else:
+            raise ValueError("observed_mask contains no evaluable entries")
         swap = e2 < e1
         info = dict(level="global", bits=1, n_swapped=int(swap),
                     assign="P2=A" if swap else "P1=A")
         return (B_pred, A_pred, info) if swap else (A_pred, B_pred, info)
 
     if level == "per_gene":
-        e1 = ((A_pred - A_true) ** 2).mean(0) + ((B_pred - B_true) ** 2).mean(0)
-        e2 = ((A_pred - B_true) ** 2).mean(0) + ((B_pred - A_true) ** 2).mean(0)
+        if observed is None:
+            e1 = ((A_pred - A_true) ** 2).mean(0) + ((B_pred - B_true) ** 2).mean(0)
+            e2 = ((A_pred - B_true) ** 2).mean(0) + ((B_pred - A_true) ** 2).mean(0)
+        else:
+            e1 = np.full(A_pred.shape[1], np.inf, dtype=float)
+            e2 = np.full(A_pred.shape[1], np.inf, dtype=float)
+            for gene in range(A_pred.shape[1]):
+                keep = observed[:, gene]
+                if not keep.any():
+                    continue
+                e1[gene] = np.mean(
+                    (A_pred[keep, gene] - A_true[keep, gene]) ** 2
+                ) + np.mean((B_pred[keep, gene] - B_true[keep, gene]) ** 2)
+                e2[gene] = np.mean(
+                    (A_pred[keep, gene] - B_true[keep, gene]) ** 2
+                ) + np.mean((B_pred[keep, gene] - A_true[keep, gene]) ** 2)
         swap = e2 < e1
         A_o = np.where(swap[None, :], B_pred, A_pred)
         B_o = np.where(swap[None, :], A_pred, B_pred)
@@ -91,13 +149,27 @@ def orient(A_pred, B_pred, A_true, B_true, level="global"):
     raise ValueError(f"unknown orientation level: {level}")
 
 
-def orientation_audit(A_pred, B_pred, A_true, B_true, name=""):
+def orientation_audit(
+    A_pred, B_pred, A_true, B_true, name="", observed_mask=None
+):
     """Saber Fig 3E-style table: how much does each orientation level buy, and
     how much reference information does it cost to buy it?"""
     rows = []
     for lvl in ("raw", "global", "per_gene"):
-        A_o, B_o, info = orient(A_pred, B_pred, A_true, B_true, lvl)
-        mse = 0.5 * (np.mean((A_o - A_true) ** 2) + np.mean((B_o - B_true) ** 2))
+        A_o, B_o, info = orient(
+            A_pred, B_pred, A_true, B_true, lvl, observed_mask
+        )
+        observed = _resolved_observed_mask(A_true, B_true, observed_mask)
+        if observed is None:
+            mse = 0.5 * (
+                np.mean((A_o - A_true) ** 2)
+                + np.mean((B_o - B_true) ** 2)
+            )
+        else:
+            mse = 0.5 * (
+                np.mean((A_o[observed] - A_true[observed]) ** 2)
+                + np.mean((B_o[observed] - B_true[observed]) ** 2)
+            )
         rows.append(dict(name=name, **info, mse=mse))
     base = rows[0]['mse']
     for r in rows:
@@ -106,15 +178,28 @@ def orientation_audit(A_pred, B_pred, A_true, B_true, name=""):
 
 
 def phase_metrics(A_pred, B_pred, A_true, B_true, name="", level="global",
-                  signed=False):
-    A_pred, B_pred, oinfo = orient(A_pred, B_pred, A_true, B_true, level)
+                  signed=False, observed_mask=None):
+    A_pred, B_pred, oinfo = orient(
+        A_pred, B_pred, A_true, B_true, level, observed_mask
+    )
     assign = oinfo.get("assign", oinfo["level"])
 
-    mse = 0.5 * (np.mean((A_pred - A_true) ** 2) + np.mean((B_pred - B_true) ** 2))
-    pear = 0.5 * (pearsonr(A_pred.ravel(), A_true.ravel())[0]
-                  + pearsonr(B_pred.ravel(), B_true.ravel())[0])
+    observed = _resolved_observed_mask(A_true, B_true, observed_mask)
+    if observed is None:
+        mse = 0.5 * (np.mean((A_pred - A_true) ** 2) + np.mean((B_pred - B_true) ** 2))
+        pear = 0.5 * (pearsonr(A_pred.ravel(), A_true.ravel())[0]
+                      + pearsonr(B_pred.ravel(), B_true.ravel())[0])
+    else:
+        mse = 0.5 * (
+            np.mean((A_pred[observed] - A_true[observed]) ** 2)
+            + np.mean((B_pred[observed] - B_true[observed]) ** 2)
+        )
+        pear = 0.5 * (
+            _safe_corr(A_pred[observed], A_true[observed])
+            + _safe_corr(B_pred[observed], B_true[observed])
+        )
 
-    msk = _support_mask(A_true, B_true, signed)
+    msk = _support_mask(A_true, B_true, signed, observed)
     imb_p = np.where(msk, _imbalance(A_pred, B_pred, signed), np.nan)
     imb_t = np.where(msk, _imbalance(A_true, B_true, signed), np.nan)
     with np.errstate(invalid='ignore'):
@@ -140,8 +225,12 @@ def phase_metrics(A_pred, B_pred, A_true, B_true, name="", level="global",
     # unordered pair -- needs no parental label at all
     maj_p, min_p = np.maximum(A_pred, B_pred), np.minimum(A_pred, B_pred)
     maj_t, min_t = np.maximum(A_true, B_true), np.minimum(A_true, B_true)
-    major_r = pearsonr(maj_p.ravel(), maj_t.ravel())[0]
-    minor_r = pearsonr(min_p.ravel(), min_t.ravel())[0]
+    if observed is None:
+        major_r = pearsonr(maj_p.ravel(), maj_t.ravel())[0]
+        minor_r = pearsonr(min_p.ravel(), min_t.ravel())[0]
+    else:
+        major_r = _safe_corr(maj_p[observed], maj_t[observed])
+        minor_r = _safe_corr(min_p[observed], min_t[observed])
 
     return dict(name=name, assign=assign, orient_level=level, mse=mse, pearson=pear,
                 imb_spearman=imb_sp, imb_pcc=imb_pcc, imb_gene_pcc=imb_gene_pcc,
@@ -173,7 +262,10 @@ def baseline_nmf2(combined, seed=0):
     return Wm[:, :1] @ Hm[:1, :], Wm[:, 1:] @ Hm[1:, :]
 
 
-def run_baselines(combined, A_true, B_true, seed=0, proj=None, signed=False):
+def run_baselines(
+    combined, A_true, B_true, seed=0, proj=None, signed=False,
+    observed_mask=None,
+):
     """proj: optional callable applied to every baseline output, so baselines
     pass through the same representational bottleneck as the model.
 
@@ -185,11 +277,20 @@ def run_baselines(combined, A_true, B_true, seed=0, proj=None, signed=False):
     p = (lambda x: x) if proj is None else proj
     out = []
     a, b = baseline_random_split(combined, seed)
-    out.append(phase_metrics(p(a), p(b), A_true, B_true, "RandomSplit", signed=signed))
+    out.append(phase_metrics(
+        p(a), p(b), A_true, B_true, "RandomSplit", signed=signed,
+        observed_mask=observed_mask,
+    ))
     a, b = baseline_mean_fraction_shrinkage(combined)
-    out.append(phase_metrics(p(a), p(b), A_true, B_true, "MeanFractionShrinkage", signed=signed))
+    out.append(phase_metrics(
+        p(a), p(b), A_true, B_true, "MeanFractionShrinkage", signed=signed,
+        observed_mask=observed_mask,
+    ))
     a, b = baseline_nmf2(combined, seed)
-    out.append(phase_metrics(p(a), p(b), A_true, B_true, "NMF2Factor", signed=signed))
+    out.append(phase_metrics(
+        p(a), p(b), A_true, B_true, "NMF2Factor", signed=signed,
+        observed_mask=observed_mask,
+    ))
     return out
 
 
@@ -241,7 +342,7 @@ def differential_metrics(A_pred, B_pred, A_true, B_true, name=""):
 
 
 def headline(A_pred, B_pred, A_true, B_true, name="", to_dc=None, signed=False,
-             level="global"):
+             level="global", observed_mask=None):
     """The four numbers actually being tracked: global PCC, per-cell PCC,
     imbalance PCC, high-imbalance AUROC. Identical treatment for every method.
 
@@ -252,7 +353,14 @@ def headline(A_pred, B_pred, A_true, B_true, name="", to_dc=None, signed=False,
     already fixed the phase assignment upstream and must not spend a second bit
     on it -- the GRN head does this, inheriting the expression branch's decision.
     """
-    A_pred, B_pred, _ = orient(A_pred, B_pred, A_true, B_true, level)
+    A_pred, B_pred, _ = orient(
+        A_pred, B_pred, A_true, B_true, level, observed_mask
+    )
+    observed = _resolved_observed_mask(A_true, B_true, observed_mask)
+    if observed is not None and to_dc is not None:
+        raise ValueError(
+            "to_dc cannot be used with partially observed reference matrices"
+        )
     if to_dc is not None:
         pA, pB = to_dc(A_pred), to_dc(B_pred)
         gA, gB = to_dc(A_true), to_dc(B_true)
@@ -260,20 +368,49 @@ def headline(A_pred, B_pred, A_true, B_true, name="", to_dc=None, signed=False,
         pA, pB, gA, gB = A_pred, B_pred, A_true, B_true
 
     # per-channel similarity to the reference: Phase A vs maternal, B vs paternal
-    pcc_A = pearsonr(pA.ravel(), gA.ravel())[0]
-    pcc_B = pearsonr(pB.ravel(), gB.ravel())[0]
-    pcc_cA = np.nanmean([pearsonr(pA[c], gA[c])[0] for c in range(pA.shape[0])])
-    pcc_cB = np.nanmean([pearsonr(pB[c], gB[c])[0] for c in range(pB.shape[0])])
-    _cos = lambda X, Y: float(np.nanmean(
-        (X * Y).sum(1) / (np.linalg.norm(X, axis=1) * np.linalg.norm(Y, axis=1) + 1e-12)))
-    cos_A, cos_B = _cos(pA, gA), _cos(pB, gB)
-    # gene-space MSE per channel (unprojected units)
-    mse_A = float(np.mean((A_pred - A_true) ** 2))
-    mse_B = float(np.mean((B_pred - B_true) ** 2))
+    if observed is None:
+        pcc_A = pearsonr(pA.ravel(), gA.ravel())[0]
+        pcc_B = pearsonr(pB.ravel(), gB.ravel())[0]
+        pcc_cA = np.nanmean([pearsonr(pA[c], gA[c])[0] for c in range(pA.shape[0])])
+        pcc_cB = np.nanmean([pearsonr(pB[c], gB[c])[0] for c in range(pB.shape[0])])
+        _cos = lambda X, Y: float(np.nanmean(
+            (X * Y).sum(1) / (np.linalg.norm(X, axis=1) * np.linalg.norm(Y, axis=1) + 1e-12)))
+        cos_A, cos_B = _cos(pA, gA), _cos(pB, gB)
+        mse_A = float(np.mean((A_pred - A_true) ** 2))
+        mse_B = float(np.mean((B_pred - B_true) ** 2))
+    else:
+        pcc_A = _safe_corr(pA[observed], gA[observed])
+        pcc_B = _safe_corr(pB[observed], gB[observed])
+        pcc_cA = float(np.nanmean([
+            _safe_corr(pA[c, observed[c]], gA[c, observed[c]])
+            for c in range(pA.shape[0])
+        ]))
+        pcc_cB = float(np.nanmean([
+            _safe_corr(pB[c, observed[c]], gB[c, observed[c]])
+            for c in range(pB.shape[0])
+        ]))
+
+        def _masked_cos(X, Y):
+            rows = []
+            for cell in range(X.shape[0]):
+                keep = observed[cell]
+                if not keep.any():
+                    continue
+                x, y = X[cell, keep], Y[cell, keep]
+                rows.append(
+                    float(np.dot(x, y) / (
+                        np.linalg.norm(x) * np.linalg.norm(y) + 1e-12
+                    ))
+                )
+            return float(np.nanmean(rows)) if rows else np.nan
+
+        cos_A, cos_B = _masked_cos(pA, gA), _masked_cos(pB, gB)
+        mse_A = float(np.mean((A_pred[observed] - A_true[observed]) ** 2))
+        mse_B = float(np.mean((B_pred[observed] - B_true[observed]) ** 2))
     pcc_g = 0.5 * (pcc_A + pcc_B)
     pcc_c = 0.5 * (pcc_cA + pcc_cB)
 
-    msk = _support_mask(A_true, B_true, signed)
+    msk = _support_mask(A_true, B_true, signed, observed)
     imb_p = np.where(msk, _imbalance(A_pred, B_pred, signed), np.nan)
     imb_t = np.where(msk, _imbalance(A_true, B_true, signed), np.nan)
     imb = pearsonr(imb_p[msk], imb_t[msk])[0]
@@ -302,5 +439,7 @@ def headline(A_pred, B_pred, A_true, B_true, name="", to_dc=None, signed=False,
                 pcc_A=pcc_A, pcc_B=pcc_B, pcc_cell_A=pcc_cA, pcc_cell_B=pcc_cB,
                 cos_A=cos_A, cos_B=cos_B, mse_A=mse_A, mse_B=mse_B,
                 imb=imb, imb_gene=imb_gene, auroc=auroc,
-                auroc_A=auroc_A, auroc_B=auroc_B)
-
+                auroc_A=auroc_A, auroc_B=auroc_B,
+                evaluation_space=(
+                    "full_matrix" if observed is None else "observed_gene_entries"
+                ))
