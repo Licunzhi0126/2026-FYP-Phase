@@ -1,0 +1,11 @@
+# Reference experiments. In v0.2, authoritative registry is causal/interventions.py.
+start_seed: 42
+n_seeds: 12
+conditions:
+  - original
+  - no_final_log_gate
+  - no_grn_imprint_gate
+  - no_expression_imprint_gates
+  - upstream_only
+  - promoter_equal_final_on
+  - promoter_equal_final_off

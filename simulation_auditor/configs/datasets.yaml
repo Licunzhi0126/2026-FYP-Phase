@@ -1,0 +1,4 @@
+# Documentation example. CLI arguments override this; not loaded automatically in v0.2.
+# Use relative paths from project root rather than workstation-specific paths.
+V6: data/SIM_V6
+V7: data/simulation

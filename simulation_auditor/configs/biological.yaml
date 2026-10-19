@@ -1,0 +1,5 @@
+# Reference defaults documented for v0.2; command line supports --grn-threshold.
+expression_pseudocount: 1.0e-12
+promoter_accessibility_pseudocount: 1.0e-3
+balanced_allele_fraction: [0.4, 0.6]
+grn_support_threshold: 1.0e-8

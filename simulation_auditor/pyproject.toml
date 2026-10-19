@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simulation-auditor"
+version = "0.2.0"
+description = "Allele-specific simulation B+C audit toolkit"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "matplotlib>=3.7", "scikit-learn>=1.2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["simulation_auditor", "simulation_auditor.core", "simulation_auditor.adapters",
+            "simulation_auditor.biological", "simulation_auditor.causal",
+            "simulation_auditor.reporting"]
+package-dir = {"simulation_auditor" = "."}

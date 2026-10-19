@@ -1,16 +1,36 @@
-# Large and generated project artifacts
-/data/
-/report/
-/output/
-
-# Local platform and Codex metadata
-/__MACOSX/
-/.agents/
-/.git.invalid-backup-*/
-.DS_Store
-
-# Python caches and local environments
+# Python caches and build artifacts
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+/build/
+/dist/
+
+# Local Python environments
 .venv/
+venv/
+env/
+
+# Generated audit outputs (keep the committed simulation/ dataset)
+/outputs/
+/output/
+/report/
+/reports/
+
+# Local credentials and tooling metadata
+.env
+.env.*
+!.env.example
+/.agents/
+/.codex/
+/.git.invalid-backup-*/
+.ipynb_checkpoints/
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+/__MACOSX/

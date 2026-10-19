@@ -1,0 +1,9 @@
+module_id,module_type,n_core_tf,n_aux_tf,strength_class
+module_001,functional,1,3,moderate
+module_002,functional,3,1,weak
+module_003,functional,1,5,strong
+module_004,functional,1,2,strong
+module_005,functional,3,3,strong
+module_006,functional,3,5,strong
+module_007,local,1,1,weak
+module_008,local,3,4,weak
