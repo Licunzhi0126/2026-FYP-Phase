@@ -5,7 +5,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+.tox/
+.nox/
 *.egg-info/
 /build/
 /dist/
@@ -15,11 +19,27 @@ htmlcov/
 venv/
 env/
 
-# Generated audit outputs (keep the committed simulation/ dataset)
+# Local simulation datasets (root only; generator source stays tracked)
+/simulation/
+/data/
+
+# Generated audit outputs
 /outputs/
 /output/
 /report/
 /reports/
+
+# Data and figures written alongside the generator and downstream scripts
+/simulation_generation/**/*.csv
+/simulation_generation/**/*.png
+
+# Local archives at the project root
+/*.zip
+/*.7z
+/*.rar
+/*.tar
+/*.tar.gz
+/*.tgz
 
 # Local credentials and tooling metadata
 .env

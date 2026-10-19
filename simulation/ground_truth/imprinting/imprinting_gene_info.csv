@@ -1,7 +1,0 @@
-gene_id,chromosome,chromatin_region_id,imprinting_status,imprinting_strength,paternal_imprinting_gate,maternal_imprinting_gate
-gene_0011,chr1,region_00019,paternal_expressed,0.8156,1.0,0.03
-gene_0043,chr2,region_00075,maternal_expressed,0.9371,0.03,1.0
-gene_0065,chr3,region_00109,maternal_expressed,0.8749,0.03,1.0
-gene_0066,chr3,region_00116,paternal_expressed,0.8452,1.0,0.03
-gene_0080,chr4,region_00137,maternal_expressed,0.8041,0.03,1.0
-gene_0084,chr5,region_00154,maternal_expressed,0.8742,0.03,1.0
